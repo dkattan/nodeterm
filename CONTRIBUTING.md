@@ -92,6 +92,11 @@ why in detail.
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
 
+**Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
+inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
+let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
+eventually drifts.
+
 ## Testing
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
