@@ -10,7 +10,7 @@ import {
 } from '../shared/node-exec'
 import { sanitizeViews } from '../shared/kanban-views'
 import { CLOSED_SESSIONS_CAP } from '../shared/types'
-import type { BridgeLink, CanvasNodeState, ClosedSessionEntry, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
+import type { BridgeLink, CanvasNodeState, ClosedSessionEntry, Link, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
@@ -87,6 +87,55 @@ export function inlineProjectFileRelPath(id: string): string {
 }
 
 /**
+ * Lift the legacy `bridges`/`ropes` arrays into the unified `Link[]` on load — a one-time,
+ * forward-compatible migration (a pre-`Link` build ignores `links`; a post-`Link` file stops
+ * emitting `bridges`/`ropes`, so a file never carries both for long).
+ *
+ *  - `bridges` → `kind:'context'`, node↔node endpoints (a sticky→terminal note link is already a
+ *    bridge in the legacy shape; `meta.note` is the renderer's concern at author time, not here).
+ *  - `ropes`  → `kind:'lineage'`, `meta:{displayOnly:true}` — the "never a context link" invariant.
+ *
+ * Existing ids (`bridge-…`/`ctrl-…`) are preserved VERBATIM so the dedup / covered-rope logic
+ * (`noteLink.hiddenLinkIds` / `linkIdsCoveredByRopes`) is undisturbed. Returns `undefined` when
+ * the result is empty so a link-less project stays byte-identical to a pre-`Link` file (the same
+ * omit-when-empty posture `kanban`/`worktree` use). Pure so it is unit-testable in isolation.
+ */
+export function migrateLinks(f: {
+  links?: Link[]
+  bridges?: BridgeLink[]
+  ropes?: BridgeLink[]
+}): Link[] | undefined {
+  if (f.links) return f.links
+  // Hostile input like the rest of the file: a non-list or a malformed entry (a `null`, a number,
+  // an entry with missing/`{}` endpoints) is DROPPED here, never dereferenced — this runs on every
+  // load path, and a hand-edited file must not throw (or fabricate endpoints) under us.
+  const ok = (l: unknown): l is BridgeLink =>
+    isRecord(l) &&
+    typeof l.id === 'string' && l.id !== '' &&
+    typeof l.source === 'string' && l.source !== '' &&
+    typeof l.target === 'string' && l.target !== ''
+  const out: Link[] = []
+  for (const b of (Array.isArray(f.bridges) ? f.bridges : []).filter(ok)) {
+    out.push({
+      id: b.id,
+      kind: 'context',
+      source: { ref: 'node', nodeId: b.source },
+      target: { ref: 'node', nodeId: b.target }
+    })
+  }
+  for (const r of (Array.isArray(f.ropes) ? f.ropes : []).filter(ok)) {
+    out.push({
+      id: r.id,
+      kind: 'lineage',
+      source: { ref: 'node', nodeId: r.source },
+      target: { ref: 'node', nodeId: r.target },
+      meta: { displayOnly: true }
+    })
+  }
+  return out.length ? out : undefined
+}
+
+/**
  * On-disk shape of <cwd>/.nodeterm/project.json — a GIT-SHARED document (users are asked to
  * commit it so the canvas travels with the repo).
  *
@@ -133,7 +182,12 @@ export interface ProjectFileV1 {
    */
   viewport?: Viewport
   nodes: CanvasNodeState[]
+  /** The unified typed link substrate (replaces bridges/ropes). Written by new builds; see
+   *  {@link migrateLinks}. Optional and additive — a pre-`Link` build ignores it. */
+  links?: Link[]
+  /** LEGACY read-only migration source (see {@link migrateLinks}); new writes omit this. */
   bridges?: BridgeLink[]
+  /** LEGACY read-only migration source (see {@link migrateLinks}); new writes omit this. */
   ropes?: BridgeLink[]
   /**
    * LEGACY (read-only), same rule as `viewport`: a managed Claude account id names a credential
@@ -365,8 +419,9 @@ export function projectToFile(
   const layouts = sanitizeLayouts(p.layouts)
   // Same two-seam rule for the board (see `sanitizeKanban`).
   const kanban = p.kanban ? sanitizeKanban(p.kanban) : undefined
-  const bridges = p.bridges ? sanitizeLinks(p.bridges) : undefined
-  const ropes = p.ropes ? sanitizeLinks(p.ropes) : undefined
+  // New builds write the unified `links` only. A project still carrying legacy `bridges`/`ropes`
+  // (during the renderer repoint) is migrated here so the file is always in the new shape.
+  const links = p.links ?? migrateLinks(p)
   return {
     version: 1,
     rev,
@@ -377,10 +432,7 @@ export function projectToFile(
     viewport: framingViewport(nodes),
     nodes,
     ...(icon ? { icon } : {}),
-    // The same two-seam rule as the board: what we write is what the next machine trusts.
-    ...(bridges ? { bridges } : {}),
-    ...(ropes ? { ropes } : {}),
-    ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
+    ...(links ? { links } : {}),    ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
     // Strict-normalised (literal true only, known keys only) and omitted when off — an off
     // capability adds no bytes to the committed file. `capabilityAck` is deliberately NOT here:
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
@@ -645,8 +697,7 @@ export function fileToProject(
   // in as well as out is what stops workspace.json accumulating orphans forever.
   const layoutViewports = pruneLayoutViewports(base.layoutViewports, layouts)
   const kanban = sanitizeKanban(f.kanban)
-  const bridges = f.bridges ? sanitizeLinks(f.bridges) : undefined
-  const ropes = f.ropes ? sanitizeLinks(f.ropes) : undefined
+  const links = migrateLinks(f)
   return {
     id: base.id,
     // A project whose stored name IS its own path is one this machine (or a teammate's) created
@@ -670,10 +721,9 @@ export function fileToProject(
         base.id
       )
     ),
-    // Hostile input like the rest of the file: a non-list or a malformed entry threw on load.
-    ...(bridges ? { bridges } : {}),
-    ...(ropes ? { ropes } : {}),
-    ...(defaultAccountId ? { defaultAccountId } : {}),
+    // Migrate legacy bridges/ropes into the unified `links` on read. A file already carrying
+    // `links` passes through; a link-less project stays link-less (migrateLinks returns undefined).
+    ...(links ? { links } : {}),    ...(defaultAccountId ? { defaultAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     // The file is hostile input: only a literal `true` under a known key survives the read
     // (readProjectCapabilities). `"true"`, 1, {} et al. vanish here, at the boundary.

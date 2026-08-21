@@ -6,13 +6,13 @@ import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
   DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
-  type BridgeLink, type CanvasNodeState, type KanbanColumn, type KanbanLabel, type Project, type ProjectKanban,
+  type BridgeLink, type CanvasNodeState, type KanbanColumn, type KanbanLabel, type Link, type Project, type ProjectKanban,
   type Workspace, type WorkspaceSaveOptions, type WorkspaceV1
 } from '../shared/types'
 import { contentOf, type CanvasContent } from '../shared/canvas-content'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, inlineProjectFileRelPath, isInlineProjectFileId,
-  projectToFile, resolveNodes, sameProjectContent,
+  migrateLinks, projectToFile, resolveNodes, sameProjectContent,
   sanitizeLoadedClosedSessions, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace,
   sanitizeKanban,
   sanitizeLinks,
@@ -505,12 +505,10 @@ export class WorkspaceStore {
         // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render —
         // and the same trigger shape rule (workspace.json is hand-editable input too).
         // `rest` drops BOTH guarded fields; each is added back below only if it passes its guard.
-        const { kanban, closedSessions, layouts, layoutViewports, bridges, ropes, ...rest } = e.project
-        const admittedKanban = sanitizeKanban(kanban)
-        const base = admittedKanban ? { ...rest, kanban: admittedKanban } : rest
-        // The canvas links, like the board: a non-list or a `null` entry threw on project load.
-        const admittedBridges = bridges ? sanitizeLinks(bridges) : undefined
-        const admittedRopes = ropes ? sanitizeLinks(ropes) : undefined
+        // Likewise lift legacy bridges/ropes into `links` (migrateLinks) the way fileToProject does
+        // for ref'd projects, so an inline canvas written by a pre-`Link` build still loads edges.
+        const { kanban, closedSessions, layouts, layoutViewports, ...rest } = e.project
+        const base = sanitizeKanban(kanban) ? { ...rest, kanban: sanitizeKanban(kanban) } : rest
         // An inline project's embedded layouts are hand-editable input exactly like a git-shared
         // file's, and they never pass through `fileToProject` on this branch, so they are
         // sanitized (and their cameras pruned against them) here instead.
@@ -521,13 +519,19 @@ export class WorkspaceStore {
         // non-array throws and takes the whole sidebar render down) and hands each entry's node
         // to React Flow.
         const history = sanitizeLoadedClosedSessions(closedSessions)
+        const links = migrateLinks(e.project)
+        // The lifted links ride the ENTRY too: persistedCanvases' inline leg reads e.project raw
+        // (hand-editable index JSON is exactly what the context-link map and the station-notice
+        // recipient rule iterate), so the legacy fields must not linger beside their lift.
+        e.project = {
+          ...base,
+          ...(links ? { links } : {})
+        } as typeof e.project
         built.push({
           entry: e,
           project: {
-            ...base,
+            ...e.project,
             nodes: sanitizeNodeTriggers(base.nodes),
-            ...(admittedBridges ? { bridges: admittedBridges } : {}),
-            ...(admittedRopes ? { ropes: admittedRopes } : {}),
             ...(history ? { closedSessions: history } : {}),
             ...(admitted ? { layouts: admitted } : {}),
             ...(views ? { layoutViewports: views } : {})
@@ -1970,37 +1974,16 @@ export class WorkspaceStore {
    * project.json, so a project whose file has never been read this run is simply absent (it
    * appears after the next load/save, which is also what re-derives the map).
    */
-  // `bridges` and `ropes` go through `sanitizeLinks` on all three legs: the index entry and the
-  // last-written file are the raw, hand-editable JSON (not the admitted project), and the
-  // context-link map built from this (`buildBackgroundLinkMaps`) iterates every entry — as does the
-  // station-failure notice's recipient rule (`stationRecipient`), which reads the ropes.
-  persistedCanvases(): Array<{
-    id: string
-    nodes: CanvasNodeState[]
-    bridges?: BridgeLink[]
-    ropes?: BridgeLink[]
-  }> {
-    const out: Array<{
-      id: string
-      nodes: CanvasNodeState[]
-      bridges?: BridgeLink[]
-      ropes?: BridgeLink[]
-    }> = []
+  // The unified `links` substrate is what both the context-link map (`buildBackgroundLinkMaps`)
+  // and the station-failure notice's recipient rule read; the raw index entries are hand-editable
+  // JSON, so every leg migrates legacy fields into links before a consumer ever sees them.
+  persistedCanvases(): Array<{ id: string; nodes: CanvasNodeState[]; links?: Link[] }> {
+    const out: Array<{ id: string; nodes: CanvasNodeState[]; links?: Link[] }> = []
     for (const e of this.index?.entries ?? []) {
       if (e.project) {
-        out.push({
-          id: e.project.id,
-          nodes: e.project.nodes,
-          bridges: sanitizeLinks(e.project.bridges),
-          ropes: sanitizeLinks(e.project.ropes)
-        })
+        out.push({ id: e.project.id, nodes: e.project.nodes, links: e.project.links })
       } else if (e.cache) {
-        out.push({
-          id: e.id,
-          nodes: e.cache.nodes,
-          bridges: sanitizeLinks(e.cache.bridges),
-          ropes: sanitizeLinks(e.cache.ropes)
-        })
+        out.push({ id: e.id, nodes: e.cache.nodes, links: migrateLinks(e.cache) })
       } else if (e.cwd) {
         const raw = this.lastWritten.get(projectFilePath(e.cwd))
         if (!raw) continue
@@ -2010,12 +1993,7 @@ export class WorkspaceStore {
           // a caller sees the same absolute paths the desktop's renderer would have handed it.
           // Keyed by the ENTRY id — the map's consumers look projects up by the id the renderer
           // knows, which is never the git-shared file's (it no longer has one).
-          out.push({
-            id: e.id,
-            nodes: resolveNodes(f.nodes, e.cwd),
-            bridges: sanitizeLinks(f.bridges),
-            ropes: sanitizeLinks(f.ropes)
-          })
+          out.push({ id: e.id, nodes: resolveNodes(f.nodes, e.cwd), links: migrateLinks(f) })
         } catch {
           // Corrupt cached content: skip this entry, keep scanning the others.
         }
@@ -2798,20 +2776,18 @@ function migrateLegacy(parsed: unknown): Workspace {
       // migrates the file.
       const layouts = sanitizeLayouts(p.layouts)
       const views = pruneLayoutViewports(sanitizeLayoutViewports(p.layoutViewports), layouts)
-      // And the canvas links, for the same reason: a malformed rope threw at project load.
-      const bridges = p.bridges ? sanitizeLinks(p.bridges) : undefined
-      const ropes = p.ropes ? sanitizeLinks(p.ropes) : undefined
+      // And the canvas links, for the same reason: a malformed rope threw at project load. The
+      // legacy fields lift into the unified `links` the same way fileToProject migrates them.
+      const links = migrateLinks(p)
       const unchanged = history === p.closedSessions
         && layouts === p.layouts
         && views === p.layoutViewports
-        && bridges === p.bridges
-        && ropes === p.ropes
+        && links === undefined
       if (unchanged) return p
       const { closedSessions: _c, layouts: _l, layoutViewports: _v, bridges: _b, ropes: _r, ...rest } = p
       return {
         ...rest,
-        ...(bridges ? { bridges } : {}),
-        ...(ropes ? { ropes } : {}),
+        ...(links ? { links } : {}),
         ...(history ? { closedSessions: history } : {}),
         ...(layouts ? { layouts } : {}),
         ...(views ? { layoutViewports: views } : {})

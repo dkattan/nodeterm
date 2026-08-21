@@ -5,8 +5,13 @@ import { capabilityAgentId } from '@shared/agents/config'
 import { barFillPercent, contextFillColor, contextPillText, formatModelLabel, formatTimeAgo, formatTokensShort, percentText } from '../lib/usageFormat'
 
 /**
- * Per-Claude-node context-window meter. A small header pill (mini-bar + "NN%") that toggles
- * a popover with token figures and model. Renders nothing until the session has usage data.
+ * Per-agent context-window meter. A small header pill (mini-bar + "NN%") that toggles a popover
+ * with token figures and model. Renders nothing until the session has usage data.
+ *
+ * `modelOverride` is the node's explicit launch selection. Transcript usage necessarily trails a
+ * model switch until the replacement model writes its first assistant turn, so the selected model
+ * owns the label immediately while the measured transcript remains authoritative for token usage.
+ * Nodes with no explicit selection continue to show the model reported by the transcript.
  */
 export function ContextMeter({ sessionId, nodeId, remote = false, agentId }: {
   sessionId: string | null
@@ -39,7 +44,6 @@ export function ContextMeter({ sessionId, nodeId, remote = false, agentId }: {
   const color = contextFillColor(usage.usedPercent)
   const estimated = usage.windowSource === 'estimate'
   const modelLabel = formatModelLabel(usage.model)
-
   return (
     <div className="ctx-meter nodrag" ref={ref}>
       {open && (

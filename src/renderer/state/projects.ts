@@ -1,10 +1,11 @@
 import { create } from 'zustand'
 import type { AgentPermissionMode } from '@shared/agents/config'
 import type {
-  BridgeLink,
   CanvasMutation,
   CanvasNodeState,
+  BridgeLink,
   ClosedSessionEntry,
+  Link,
   NavStop,
   Project,
   ProjectKanban,
@@ -133,14 +134,9 @@ interface ProjectsState {
   /** Replaces the project's breadcrumb (navigation history) list wholesale — the UI computes the
    *  next list via lib/breadcrumbs and hands it over whole, same convention as setProjectKanban. */
   setProjectBreadcrumbs(id: string, breadcrumbs: NavStop[]): void
-  /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
-  commitCanvas(
-    id: string,
-    nodes: CanvasNodeState[],
-    viewport: Viewport,
-    bridges?: BridgeLink[],
-    ropes?: BridgeLink[]
-  ): void
+  /** Writes the serialized canvas (nodes + viewport + the unified link substrate) back into a
+   *  project. `links` merges context + lineage edges (formerly the separate `bridges`/`ropes`). */
+  commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport, bridges?: BridgeLink[], ropes?: BridgeLink[]): void
   /**
    * Appends context bridges / control ropes to a project that is loaded but NOT active — the edge
    * counterpart of `applyNodeMutation`, and for the same reason: React Flow holds only the active
@@ -150,6 +146,10 @@ interface ProjectsState {
    * `ctrl-<source>-<target>` — two ids, one relationship each. No-op for an unknown project.
    */
   appendCanvasLinks(projectId: string, links: { bridges?: BridgeLink[]; ropes?: BridgeLink[] }): void
+  /** The whole-link writer (inspector/picker): replaces the project's `links` outright. The
+   *  whole-set contract is the point — the callers see and edit the full list, including the
+   *  off-canvas xnode/branch links an edge-view commit would drop. No-op for an unknown project. */
+  commitLinks(id: string, links: Link[]): void
   /**
    * Applies ONE canvas mutation — node, edge or board — to a project's serialized content, through
    * the ONE reducer (`applyCanvasOp`, @shared/canvas-content) every client and the Server Edition
@@ -176,6 +176,13 @@ interface ProjectsState {
    * Delegates to `applyCanvasOp` (one reducer), so it takes any family.
    */
   applyNodeMutation(projectId: string, mutation: CanvasMutation): boolean
+  /**
+   * Append a fully-formed `CanvasNodeState` to a (possibly NON-active) project's serialized nodes.
+   * The seam for canvas-control `open-agent --project <B>` (ticket 05): the node is created in
+   * project B, which is not the active canvas, so it cannot go through live `setNodes` — it lands
+   * in B's `Project.nodes` and appears when B is next loaded. Other projects are untouched.
+   */
+  addNodeToProject(projectId: string, node: CanvasNodeState): void
   /**
    * The EDGE counterpart, for the same background-project path. Edges (`bridges` = context links,
    * `ropes` = display-only lineage) ride the same whole-file save as the nodes, so dropping a
@@ -677,12 +684,31 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   commitCanvas(id, nodes, viewport, bridges, ropes) {
+    // The store is the ONE conversion site: the canvas commits plain node-id-pair edge arrays
+    // (bridges = context, ropes = display-only lineage) and never learns the Link shape. The
+    // whole-arrays contract replaces the project's on-canvas links and keeps every OFF-canvas
+    // link (xnode/branch/dependency) the canvas cannot see. Legacy fields are dropped on write.
     set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === id
-          ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}), ...(ropes ? { ropes } : {}) }
-          : p
-      )
+      projects: s.projects.map((p) => {
+        if (p.id !== id) return p
+        // The store is the ONE conversion site: the canvas commits plain node-id-pair edge arrays
+        // (bridges = context, ropes = display-only lineage) and never learns the Link shape. The
+        // whole-arrays contract replaces the project's on-canvas links and keeps every OFF-canvas
+        // link (xnode/branch/dependency) the canvas cannot see. Legacy fields are dropped on write.
+        const offCanvas = (p.links ?? []).filter((l) => l.kind !== 'context' && l.kind !== 'lineage')
+        const rebuilt: Link[] = []
+        for (const b of bridges ?? [])
+          rebuilt.push({ id: b.id, kind: 'context', source: { ref: 'node', nodeId: b.source }, target: { ref: 'node', nodeId: b.target } })
+        for (const r of ropes ?? [])
+          rebuilt.push({ id: r.id, kind: 'lineage', source: { ref: 'node', nodeId: r.source }, target: { ref: 'node', nodeId: r.target }, meta: { displayOnly: true } })
+        const links = [...rebuilt, ...offCanvas]
+        return (({ bridges: _b, ropes: _r, ...rest }) => ({
+          ...rest,
+          nodes,
+          viewport,
+          ...(links.length ? { links } : {})
+        }))(p)
+      })
     }))
   },
 
@@ -752,6 +778,22 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     return true
   },
 
+  addNodeToProject(projectId, node) {
+    if (!get().projects.some((p) => p.id === projectId)) return
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) => [...nodes, node])
+    }))
+  },
+
+  commitLinks(id, links) {
+    if (!get().projects.some((p) => p.id === id)) return
+    ownWrite(get, id, () =>
+      set((st) => ({
+        projects: st.projects.map((p) =>
+          p.id === id ? { ...p, ...(links.length ? { links } : {}) } : p
+        )
+      }))
+    )
   applyOwnNodeMutations(projectId, mutations) {
     if (!get().projects.some((p) => p.id === projectId)) return false
     if (mutations.length === 0) return true

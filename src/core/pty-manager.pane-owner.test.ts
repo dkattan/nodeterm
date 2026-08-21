@@ -462,7 +462,6 @@ describe('PtyManager.terminateForeground — identity gate', () => {
     expect(await mgr.terminateForeground(NODE, 'custom:proxy')).toBe(false)
     expect(killed).toEqual([])
   })
-
   it('with no expected id, keeps the legacy shell-only guard (kills a non-shell foreground)', async () => {
     script.answer = claudeForeground
     const mgr = await killManager()

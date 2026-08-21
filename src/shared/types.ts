@@ -148,6 +148,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Persisted builtin harness for the node's current agent; survives a deleted custom definition. */
+  agentBaseId?: BuiltinAgentId
   /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
   agentModel?: string
   /**
@@ -197,7 +199,25 @@ export interface PtyCreateOptions {
    * shrink everyone's terminal). It is still a subscriber and is told the authoritative size.
    */
   sizeVote?: false
-}
+  /**
+   * This create must JOIN an already-live session for `persistKey` — never spawn a new one.
+   *
+   * The cross-project projection (ticket 05) is a VIEWER of another project's node, not its owner:
+   * B owns the `nt-<bNodeId>` session, and A's projection co-attaches to it. If B's session is not
+   * live yet (B's canvas never mounted, or a post-reboot cold start), the projection must refuse
+   * rather than become the spawner of B's session — a projection that spawned would steal ownership
+   * (the pane-ownership ledger would record A's project as the owner) and the node would run under
+   * A's resolved context instead of B's. The refusal (`PtyCreateResult.unavailable: 'no-session'`)
+   * is the honest answer: the projection shows a placeholder and retries once B mounts the session.
+   *
+   * Deliberately gated in `create()` AFTER the in-flight barrier (so a projection racing B's own
+   * spawn waits for it and then joins, rather than refusing a session that is coming up right now)
+   * and AFTER the tombstone check (a `closed` refusal is the more specific answer for a node B
+   * deleted). Unlike `requireRemote` — which refuses only the spawn branch and still allows a
+   * co-attach join — this refuses the WHOLE create when no live session exists, because there is no
+   * valid spawn branch for a projection at all.
+   */
+  requireExisting?: boolean}
 
 /** A tmux pane's cursor, as tmux reports it: 0-based column/row within the pane, plus whether the
  *  application currently wants it shown (`#{cursor_flag}`). */
@@ -379,9 +399,10 @@ export interface PtyCreateResult {
    * `'join-only'`: `PtyCreateOptions.joinOnly` was set (a hosted-relay viewer) and no running
    * session could be confirmed to join or reattach to — either it is gone, or its existence could
    * not be checked — so nothing was started. Not a lost connection.
+   * `'no-session'`: `requireExisting` was set and no live session for this node id exists (and none
+   * came up while waiting on an in-flight spawn) — the ticket-05 projection's honest answer.
    */
-  unavailable?: 'ssh' | 'codex-account' | 'join-only'
-}
+  unavailable?: 'ssh' | 'codex-account' | 'join-only' | 'no-session'}
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
 export interface RecycledInfo {
@@ -504,6 +525,13 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * The builtin harness this node's CURRENT agent speaks. Snapshotted when the node is created or
+   * reopened as another agent, so deleting/editing a CustomAgent definition cannot erase the
+   * node's capabilities, icon, or resume grammar. Mutable together with `agentId`; this is current
+   * node identity, not immutable creation history.
+   */
+  agentBaseId?: BuiltinAgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
   /**
@@ -604,6 +632,15 @@ export interface CanvasNodeState {
    * would restore a few px off — and root-space also survives the frame being ungrouped meanwhile.
    */
   premaxRect?: { x: number; y: number; width: number; height: number }
+  /**
+   * group-only: when set, this frame REFERENCES another project's canvas. Drilling it switches the
+   * active project to the referenced one (ticket 09 — canvas-of-canvases). The group may also hold
+   * local children rendered on the source (meta) canvas. An unresolvable `projectId` renders as a
+   * greyed "unavailable project" (lazy-prune, never auto-deleted: reopening the folder restores the
+   * same cwd-derived id). Validated at use, like `worktree`: a `projectId` is a hand-editable string
+   * from git-shared JSON, never trusted by type alone.
+   */
+  projectRef?: { projectId: string }
 }
 
 /**
@@ -767,7 +804,11 @@ export interface Viewport {
   zoom: number
 }
 
-/** A persistent "bridge" link between two Claude nodes (lets their sessions message each other). */
+/** A persistent "bridge" link between two Claude nodes (lets their sessions message each other).
+ *
+ *  LEGACY read-only shape: pre-`Link` files carry `bridges`/`ropes` as arrays of this. New writes
+ *  emit the unified `Link[]` (`Project.links`) instead; `migrateLinks` (core/workspace-files.ts)
+ *  lifts these into `Link` on load. Kept declared so the migration reader is typed. */
 export interface BridgeLink {
   id: string
   source: string
@@ -778,6 +819,40 @@ export interface BridgeLink {
  *  unknown value read from a hand-edited or newer file reads as ABSENT (`columnCategory`), and is
  *  left in the file untouched so a newer build's value survives an older build's save. */
 export type KanbanColumnCategory = 'unstarted' | 'started' | 'done' | 'closed'
+/**
+ * One endpoint of a typed {@link Link}. Discriminated by `ref` so consumers switch exhaustively
+ * (no id-prefix hacks — the `bridge-`/`ctrl-` prefix was the pre-`Link` discriminator and is gone).
+ *  - `node`  : a node in the SAME project that owns this link.
+ *  - `xnode` : a node in ANOTHER project (a cross-project foreign reference — names the other
+ *              project's node id, never a copy of the node; unresolved targets lazy-prune).
+ *  - `branch`: a git branch (dependency links, ticket 03).
+ */
+export type Endpoint =
+  | { ref: 'node'; nodeId: string }
+  | { ref: 'xnode'; projectId: string; nodeId: string }
+  | { ref: 'branch'; repoPath: string; branch: string }
+
+/**
+ * The persisted discriminator that replaces the "which array am I in" encoding (bridges vs ropes).
+ *  - `context`    : two CONTEXT_LINK_CAPABLE agent nodes that read each other's transcripts, OR a
+ *                   sticky→terminal note link (`meta.note` carries the sticky text). Read-back via
+ *                   the `/context-link/` route. ← migrates from `Project.bridges` (`bridge-` ids).
+ *  - `lineage`    : display-only "spawned by" edge, NEVER a context link (`meta.displayOnly: true`).
+ *                   ← migrates from `Project.ropes` (`ctrl-` ids).
+ *  - `dependency` : drives git/stack operations (ticket 03 same-repo branch endpoints, ticket 04
+ *                   cross-repo). Not authored on-canvas yet (ticket 06).
+ */
+export type LinkKind = 'context' | 'lineage' | 'dependency'
+
+/** A typed link between two {@link Endpoint}s. Replaces BOTH `Project.bridges` and `Project.ropes`. */
+export interface Link {
+  id: string
+  kind: LinkKind
+  source: Endpoint
+  target: Endpoint
+  /** 'displayOnly' (lineage ropes), 'note' (sticky→terminal text), dependency type, … */
+  meta?: Record<string, unknown>
+}
 
 /** One kanban board column. Column order = array order in ProjectKanban.columns. */
 export interface KanbanColumn {
@@ -1077,12 +1152,20 @@ export interface Project {
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */
   kanban?: ProjectKanban
-  /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
+  /**
+   * The unified, typed link substrate — replaces `bridges` + `ropes`. Every link whose `source` is
+   * a node in THIS project lives here, including links whose `target` is an `xnode` (cross-project)
+   * or a `branch` (dependency). See {@link Link} / {@link Endpoint} / {@link LinkKind}.
+   */
+  links?: Link[]
+  /** LEGACY read-only: pre-`Link` files carry `bridges`; `migrateLinks` lifts them to `links` on
+   *  load. New writes never emit this field. Absent in pre-bridge files. */
   bridges?: BridgeLink[]
   /**
-   * Visual "spawned by" ropes (control-capable agent → node it opened via the `nodeterm` CLI,
-   * or browser popup → its opener). Display-only — never context links — but persisted so the
-   * lineage survives restarts; deletable like any selected edge.
+   * LEGACY read-only: pre-`Link` files carry `ropes`; `migrateLinks` lifts them to `links` on load.
+   *  New writes never emit this field. Visual "spawned by" ropes (control-capable agent → node it
+   *  opened via the `nodeterm` CLI, or browser popup → its opener). Display-only — never context
+   *  links — but persisted so the lineage survives restarts; deletable like any selected edge.
    */
   ropes?: BridgeLink[]
   /** Camera navigation history — deliberate node landings, newest last. MACHINE-LOCAL: rides
@@ -2700,6 +2783,10 @@ export interface GitApi {
   /** `{ ok: false, entries: [] }` when git itself could not be read — which is NOT the same fact as
    *  "this repo has no worktrees", and no caller may treat it as one (see worktree-ops). */
   worktreeList(repoPath: string): Promise<import('./worktree').WorktreeListResult>
+  /** `git submodule status --recursive`. Same `{ ok, entries }` contract as `worktreeList`: a failed
+   *  git read is `{ ok: false, entries: [] }`, NOT "no submodules" — `ok` changes no facts (see
+   *  worktree-ops `listSubmodules`). Drives the meta-canvas submodule auto-link (ticket 09). */
+  submoduleList(repoPath: string): Promise<import('./worktree').SubmoduleListResult>
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
   /** `push`: also publish `baseRef` to origin after a successful merge (only if a remote exists).
    *  Opt-in — a merge must never publish to a shared remote the user was not told about. */
@@ -2707,6 +2794,20 @@ export interface GitApi {
   /** `pruneOnly`: clean up git's registration only — never delete a directory. Used to prune a
    *  stale binding whose worktree was already deleted outside the app. */
   worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean): Promise<GitResult>
+  /** Declare a branch's parent in the shared git config (the git-town `git-town-branch.<child>.parent`
+   *  convention — plain `git config`, no binary). `repoPath` is any worktree's cwd (config is shared). */
+  setBranchParent(repoPath: string, child: string, parent: string): Promise<GitResult>
+  /** Drop a branch's parent config (`git config --unset`). The dependency link is removed separately. */
+  unsetBranchParent(repoPath: string, child: string): Promise<GitResult>
+  /** Rebase `child` onto its configured parent, run in the child branch's own worktree cwd. Returns
+   *  `ok:false` with a "resolve conflicts" message when the rebase stops on a conflict (the user
+   *  continues/aborts in the worktree's terminal). No git-town binary. */
+  syncBranch(cwd: string, child: string): Promise<GitResult>
+  /** Open a PR from `child` into its parent (`gh pr create --base <parent> --head <child>`). */
+  proposeBranch(cwd: string, child: string): Promise<GitResult>
+  /** Fast-forward `child` into its parent when clean (a v1 simplification of full stack ship: no
+   *  multi-descendant restack). Run in the parent's worktree cwd. */
+  shipBranch(cwd: string, child: string, parent: string): Promise<GitResult>
   /** Scope remote git routing to the active project: pass its id to route git over that SSH
    *  project's master, or null for a local project so all git ops run locally. */
   setActiveRemote(projectId: string | null): Promise<void>

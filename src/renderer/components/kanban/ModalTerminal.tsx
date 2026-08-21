@@ -9,7 +9,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { quantizeCharSize } from '../../terminal/char-size-quantize'
 import { reportsOwnCopy } from '@shared/agents/config'
-import type { AgentId } from '@shared/agents/config'
+import type { AgentId, BuiltinAgentId } from '@shared/agents/config'
 import { effectiveAccountId } from '../../lib/accountChip'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../../lib/projectJump'
@@ -71,6 +71,7 @@ export interface ModalSpawn {
   shell?: string
   cwd?: string
   agentId?: string
+  agentBaseId?: BuiltinAgentId
   accountId?: string
   /** The node's `data.ssh` — a local `ssh <host>` node runs ssh as its pty program. */
   ssh?: SshConnection
@@ -161,7 +162,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch, covere
   const copy = useCopyFeedback({
     hostRef,
     hasSelection: () => !!termRef.current?.hasSelection(),
-    enabled: !reportsOwnCopy(spawn.agentId as AgentId | undefined)
+    enabled: !reportsOwnCopy((spawn.agentBaseId ?? spawn.agentId) as AgentId | undefined)
   })
   // Right-click on a URL → the canvas node's link menu, URL rows only (no file links here — see the
   // link wiring in the lifecycle effect).
@@ -183,7 +184,9 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch, covere
     // MIRROR TerminalNode: the transcript index reads claude's JSONL through claude's resolver, so
     // it is gated on the claude-transcript fact, NOT on the context meter's `hasUsage` (which now
     // spans codex and gemini too) — see lib/transcriptGates.ts.
-    searchTranscript: readsClaudeTranscript(spawn.agentId),
+    searchTranscript: readsClaudeTranscript(
+      (spawn.agentBaseId ?? spawn.agentId) as AgentId | undefined
+    ),
     open: searchOpen,
     readBuffer
   })
@@ -373,6 +376,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch, covere
         // non-active project. Recorded main-side only on a genuine fresh spawn.
         ownerProjectId: projectId,
         agentId: spawn.agentId,
+        agentBaseId: spawn.agentBaseId,
         accountId: spawn.accountId,
         sshRemote,
         requireRemote: spawn.sshRemoteTmux

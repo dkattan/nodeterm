@@ -113,7 +113,7 @@ export type ClaudeSwitchOutcome =
       reason: 'not-claude' | 'remote' | 'no-session' | 'unavailable' | 'no-connection' | 'not-attached'
     }
   /** The CLI never quit (busy / not eligible at call time, or it did not exit in time). */
-  | { kind: 'not-restarted'; outcome: 'exit-timeout' | 'not-eligible' }
+  | { kind: 'not-restarted'; outcome: 'exit-timeout' | 'not-eligible' | 'model-no-session' | 'model-pane-mismatch' | 'model-unavailable' }
   /** Quit and came back — on its ORIGINAL account, because the copy was refused. */
   | { kind: 'copy-failed'; reason: string }
 

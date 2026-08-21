@@ -484,6 +484,8 @@ export type ControlVerb =
   | 'spawn-team'
   | 'open-worktree'
   | 'close-worktree'
+  | 'link-branches'
+  | 'sync-stack'
   | 'branch'
   | 'rename'
   | 'color'
@@ -528,6 +530,8 @@ const VERBS: ControlVerb[] = [
   'spawn-team',
   'open-worktree',
   'close-worktree',
+  'link-branches',
+  'sync-stack',
   'branch',
   'rename',
   'color',
@@ -743,6 +747,8 @@ export function parseControlRequest(
   if (v === 'assign' && !args.node) return { error: 'assign requires --node <id>' }
   if (v === 'open-worktree' && !args.branch) return { error: 'open-worktree requires --branch <name>' }
   if (v === 'close-worktree' && !args.group) return { error: 'close-worktree requires --group <id>' }
+  if (v === 'link-branches' && !args.base) return { error: 'link-branches requires --base <parent branch>' }
+  if (v === 'link-branches' && !args.branch) return { error: 'link-branches requires --branch <child branch>' }
   if (v === 'branch' && !args.node) return { error: 'branch requires --node <id>' }
   if (v === 'rename' && !args.node) return { error: 'rename requires --node <id>' }
   if (v === 'rename' && !args.title) return { error: 'rename requires --title' }
@@ -985,6 +991,15 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  (or have the downstream agent merge the branch first). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
     '  the user to confirm deletion.',
+    '- `link-branches --base <parent> --branch <child>` — declare a stacked-diff dependency: the child',
+    '  branch builds on the parent. Writes the lineage to the shared git config (the git-town',
+    '  `git-town-branch.<child>.parent` convention) AND records a `dependency` link that renders as a',
+    '  dashed edge between the two worktree group frames. Local projects only. Declare it once per',
+    '  pair; the sync below uses it.',
+    '- `sync-stack [--branch <child>]` — rebase a child branch onto its parent (`git rebase <parent>`),',
+    '  run in the child\'s own worktree. Omit `--branch` is not supported from the agent verb yet —',
+    '  name the child. If the rebase stops on a conflict, the reply says so and the user resolves it',
+    '  in that terminal (`git rebase --continue`). No external tool: this is plain git.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '  Renaming to the title the node ALREADY has is a no-op: nothing is typed into its agent',
@@ -1066,10 +1081,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'start only on a SUCCESSFUL upstream, and tell every station you open to finish with',
     '`report-outcome`. Then break the task into 2-5 workstreams;',
     'per stream `open-worktree --branch <slug>` then `open-agent --agent claude --group <groupId>',
-    '--prompt "<concrete task>"` (each stream on its own branch, no tree conflicts). Members land',
-    'in grid slots inside the frame automatically; align the frames themselves with',
+    '--prompt "<concrete task>" --title "<short subject>"` (each stream on its own branch, no tree',
+    'conflicts; `--title` names the station so it is distinguishable, not a bare "Claude"/"Codex").',
+    'Members land in grid slots inside the frame automatically; align the frames themselves with',
     '`arrange --nodes <groupId,…> --layout row` (pass sibling GROUP ids from one container)',
-    'and `rename` each by subject. When a station goes idle, READ what it did through the',
+    'and `rename` any you did not title. When a station goes idle, READ what it did through the',
     'context link (the linked-context CLI — see the get-linked-context section in your global',
     'agent instructions) and reconcile the streams into ONE synthesis yourself; a station you',
     'never read is one you cannot vouch for. The user merges when a stream is done;',
@@ -1422,6 +1438,10 @@ Verbs:
 - \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
+  \`--title T\` names the node at creation (pinned — the agent's own session name will not overwrite
+  it). Pass it whenever you open one station per worktree, so each is distinguishable instead of
+  every station defaulting to the agent label ("Codex", "Claude", …). For \`--count N > 1\` the
+  2nd..Nth get a \` #2\`, \` #3\`… suffix.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has finished a turn successfully — that is how you express "B needs what A produces" without
   sitting in a poll loop. The armed node is roped to each listed station (one edge,
@@ -1596,6 +1616,17 @@ ${reportOutcomeDocLines().join('\n')}
   \`git merge\` the upstream branch as its first step.
 - \`close-worktree --group <id> [--mode unbind|remove]\` — unbind (default) drops the binding
   and keeps the directory; remove asks the user to confirm deleting the worktree.
+- \`link-branches --base <parent> --branch <child>\` — declare a stacked-diff dependency: the
+  child branch is built on top of the parent. This writes the lineage to the shared git config
+  (the git-town \`git-town-branch.<child>.parent\` convention — readable by git-town if the user
+  has it, no binary required) AND records a \`dependency\` link that shows as a dashed edge
+  between the two worktree group frames. Local projects only. Declare it once per pair; it is
+  what \`sync-stack\` reads to know the parent.
+- \`sync-stack --branch <child>\` — rebase the child branch onto its parent (\`git rebase
+  <parent>\`), run in the child's own worktree (where the child is checked out). If the rebase
+  stops on a conflict, the reply says so and tells the user to resolve in that terminal and run
+  \`git rebase --continue\` (or \`--abort\`) — we do not hide a conflicted state as success, and
+  we do not auto-abort a partial resolution. Plain git, no external tool.
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
@@ -1732,13 +1763,15 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
 1. Split the task into the independent workstreams step 0 identified.
 2. Per workstream, give it its own branch + kitchen station:
    \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then
-   \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>"\`.
-   Each stream now works on its own branch in its own worktree group — no tree conflicts.
+   \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>" --title "<short subject>"\`.
+   \`--title\` names the station at creation so each is distinguishable (not a bare "Claude"/"Codex");
+   the group frame is already labelled with the branch. Each stream now works on its own branch in
+   its own worktree group — no tree conflicts.
 3. Keep the kitchen tidy: members opened with \`--group\` land in neat grid slots inside the
    frame automatically (the frame grows to fit), and successive \`open-worktree\` frames fan
    out side by side — after opening all stations, align the frames with
    \`arrange --nodes <groupId,groupId,…> --layout row\` (pass sibling GROUP ids from one
-   container, not their children). \`rename\` each group by subject.
+   container, not their children). \`rename\` any station or group you did not title with \`--title\`.
 4. Track progress (their status badges show working/waiting) and coordinate.
 5. Collect the results yourself. Every station you opened is context-linked to you, so when
    one goes idle, read what it actually did with the

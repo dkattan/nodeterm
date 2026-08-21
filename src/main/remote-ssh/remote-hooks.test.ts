@@ -98,6 +98,9 @@ describe('RemoteHooks.setup', () => {
       /cat > ('\/home\/u\/\.nodeterm\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
     )?.[1]
     expect(endpointTemp).toBeTruthy()
+    // `chmod` carries NO `--` terminator: BSD chmod (macOS) rejects `--` as a literal filename,
+    // unlike GNU chmod — and unlike `mv`/`rm` (which keep their `--` below). The temp leaf is
+    // always `.nodeterm-<uuid>.tmp` (dot-prefixed, never option-like), so it needs no terminator.
     expect(endpointWrite?.cmd).toContain(`chmod 600 ${endpointTemp}`)
     expect(endpointWrite?.cmd).toContain(
       `mv -f -- ${endpointTemp} '/home/u/.nodeterm/hook-endpoint-p1-${owner}.env'`
@@ -780,6 +783,8 @@ describe('RemoteHooks.writeNodeTokens', () => {
       /cat > ('\/home\/u\/\.nodeterm\/node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
     )?.[1]
     expect(temp).toBeTruthy()
+    // `chmod` carries NO `--` terminator (BSD chmod rejects it as a literal filename); see the
+    // matching note above. `mv`/`rm` keep their `--`; only `chmod` drops it.
     expect(writes[0].cmd).toContain(`chmod 600 ${temp}`)
     expect(writes[0].cmd).toContain(
       `mv -f -- ${temp} '/home/u/.nodeterm/node-tokens/node-1'`

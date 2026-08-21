@@ -21,6 +21,7 @@ import {
 } from '@shared/agents/config'
 import type { GatewayModel } from '@shared/agents/model-gateway'
 import type { CustomAgent } from '@shared/types'
+import { resolveAgentBase } from '@shared/agents/custom-agent'
 import type { MenuItem } from '../components/ContextMenu'
 import { AgentIcon } from './agentIcons'
 import { IconMoveTo } from '../components/icons'
@@ -32,8 +33,7 @@ import { IconMoveTo } from '../components/icons'
  * baseless custom or an unknown id. Mirrors `reopenVariants.baseOf`.
  */
 function baseOf(id: AgentId, customAgents: readonly CustomAgent[]): string | undefined {
-  if ((AGENT_CONFIG as Record<string, unknown>)[id]) return id
-  return customAgents.find((c) => c.id === id)?.baseAgent
+  return resolveAgentBase(id, customAgents.find((c) => c.id === id))
 }
 
 /** A transfer target: every enabled agent EXCEPT the source (you can't transfer a session to its

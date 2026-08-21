@@ -36,11 +36,12 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
 
 /** Hideable terminal node header buttons, in header order. */
 export const HIDEABLE_HEADER_BUTTONS: readonly HideableRow[] = [
-  { id: 'maximize', label: 'Maximize' },
+  { id: 'maximize', label: 'Maximize (focus node)' },
   { id: 'refresh', label: 'Refresh' },
   { id: 'mic', label: 'Dictate' },
   { id: 'ai-name', label: 'Name with AI' },
   { id: 'comments', label: 'Comments' },
+  { id: 'links', label: 'Links' },
   { id: 'hide-fanout', label: 'Hide cards & connections' },
   { id: 'tidy-fanout', label: 'Tidy subagent cards' },
   // Not in the header proper but the label row right under it (`lib/mdViewHint.ts`); it is the

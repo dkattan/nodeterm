@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
+import type { Link } from '../shared/types'
 import { WorkspaceStore } from './workspace-store'
 
 // `ropes` / `bridges` reach the renderer through three load seams that are not `fileToProject`'s
@@ -14,6 +15,19 @@ import { WorkspaceStore } from './workspace-store'
 let userData: string
 let projRoot: string
 const rope = (source: string, target: string) => ({ id: `ctrl-${source}-${target}`, source, target })
+const contextLink = (source: string, target: string): Link => ({
+  id: `bridge-${source}-${target}`,
+  kind: 'context',
+  source: { ref: 'node', nodeId: source },
+  target: { ref: 'node', nodeId: target }
+})
+const lineageLink = (source: string, target: string): Link => ({
+  id: `ctrl-${source}-${target}`,
+  kind: 'lineage',
+  source: { ref: 'node', nodeId: source },
+  target: { ref: 'node', nodeId: target },
+  meta: { displayOnly: true }
+})
 const HOSTILE = [null, 5, { id: 'x', source: {}, target: 'b' }, rope('a', 'b')]
 
 beforeEach(async () => {
@@ -44,8 +58,8 @@ describe('the canvas links are admitted on every load seam', () => {
       }]
     })
     const loaded = await new WorkspaceStore().load()
-    expect(loaded.projects[0].ropes).toEqual([rope('a', 'b')])
-    expect(loaded.projects[0].bridges).toBeUndefined()
+    expect(loaded.projects[0].links?.filter((l) => l.kind === 'lineage')).toEqual([lineageLink('a', 'b')])
+    expect(loaded.projects[0].links?.filter((l) => l.kind === 'context')).toEqual([])
   })
 
   it('a legacy (v2) workspace.json, which skips loadV3', async () => {
@@ -58,8 +72,8 @@ describe('the canvas links are admitted on every load seam', () => {
       }]
     })
     const loaded = await new WorkspaceStore().load()
-    expect(loaded.projects[0].ropes).toEqual([rope('a', 'b')])
-    expect(loaded.projects[0].bridges).toEqual([rope('a', 'b')])
+    expect(loaded.projects[0].links?.filter((l) => l.kind === 'lineage')).toEqual([lineageLink('a', 'b')])
+    expect(loaded.projects[0].links?.filter((l) => l.kind === 'context')).toEqual([{ ...contextLink('a', 'b'), id: 'ctrl-a-b' }])
   })
 
   it("a folder project's git-shared project.json", async () => {
@@ -78,7 +92,7 @@ describe('the canvas links are admitted on every load seam', () => {
       entries: [{ id: 'p1', name: 'foo', color: '#7aa2f7', cwd: projRoot }]
     })
     const loaded = await new WorkspaceStore().load()
-    expect(loaded.projects[0].ropes).toEqual([rope('a', 'b')])
+    expect(loaded.projects[0].links?.filter((l) => l.kind === 'lineage')).toEqual([lineageLink('a', 'b')])
   })
 
   it('persistedCanvases hands the context-link map only readable bridges (inline and folder legs)', async () => {
@@ -109,7 +123,8 @@ describe('the canvas links are admitted on every load seam', () => {
     await store.load()
     const canvases = store.persistedCanvases()
     expect(canvases.map((c) => c.id)).toEqual(['p1', 'p2'])
-    for (const c of canvases) expect(c.bridges).toEqual([rope('a', 'b')])
+    for (const c of canvases)
+      expect(c.links?.filter((l) => l.kind === 'context')).toEqual([{ ...contextLink('a', 'b'), id: 'ctrl-a-b' }])
   })
 
   it('persistedCanvases hands the station-notice recipient rule only readable ropes', async () => {
@@ -140,6 +155,7 @@ describe('the canvas links are admitted on every load seam', () => {
     const store = new WorkspaceStore()
     await store.load()
     // Read the RAW index/file legs, not an admitted project (see persistedCanvases' own comment).
-    for (const c of store.persistedCanvases()) expect(c.ropes).toEqual([rope('a', 'b')])
+    for (const c of store.persistedCanvases())
+      expect(c.links?.filter((l) => l.kind === 'lineage')).toEqual([lineageLink('a', 'b')])
   })
 })

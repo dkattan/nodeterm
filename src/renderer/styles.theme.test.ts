@@ -116,6 +116,7 @@ describe('every CSS variable resolves', () => {
     '--glass-tick', // GlassSlider, the Readable tick position (the notch)
     '--peer-color', // presence chips, per peer
     '--group-label-boost', // GroupNode, zoom-compensated label size
+    '--xproj-stroke', // XProjectNode, the origin project's colour on a cross-project projection
     '--mascot-w',
     '--mascot-h',
     '--cmascot-w',

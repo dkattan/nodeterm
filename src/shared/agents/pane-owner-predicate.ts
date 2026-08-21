@@ -203,8 +203,7 @@ export function binariesFor(
       return base && Object.prototype.hasOwnProperty.call(AGENT_BINARIES, base) ? AGENT_BINARIES[base] : null
     }
     const name = binaryFromLaunchCmd(launchCmd)
-    return name ? [name] : null
-  }
+    return name ? [name] : null  }
   // A `custom:` id we were given no definition for is unknowable — deriving from the id would yield
   // `custom:<uuid>`, a name that matches nothing, i.e. `not-agent`: a terminal answer to a question
   // we never actually asked. Anything else is treated as its own launch command, which is what
