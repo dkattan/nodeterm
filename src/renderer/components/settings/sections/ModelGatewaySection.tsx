@@ -262,41 +262,59 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
                     },
                     { option: 'custom', label: 'Custom path…', hint: 'Enter an exact path below.' }
                   ] as const
-                ).map((opt) => (
-                  <div
-                    key={opt.option}
-                    className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
-                  >
-                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
-                      <input
-                        type="radio"
-                        name="gateway-discovery-path"
-                        className="shrink-0"
-                        checked={
-                          opt.option === 'custom'
-                            ? isCustomValue
-                            : (gateway.discoveryPath ?? '/v1/models') === opt.option
-                        }
-                        onChange={() => {
-                          if (opt.option === 'custom') {
-                            setCustomMode(true)
-                            patchGateway({ discoveryPath: customPath || '/v1/models' })
-                          } else {
-                            setCustomMode(false)
-                            setCustomPath('')
-                            patchGateway({
-                              discoveryPath: opt.option === '/v1/models' ? undefined : opt.option
-                            })
-                          }
-                        }}
-                      />
-                      <div className="min-w-0">
-                        <span className="font-mono text-[13px] text-text">{opt.label}</span>
-                        <p className="text-[12px] text-muted">{opt.hint}</p>
-                      </div>
-                    </label>
-                  </div>
-                ))}
+                ).map((opt) => {
+                  const checked =
+                    opt.option === 'custom'
+                      ? isCustomValue
+                      : (gateway.discoveryPath ?? '/v1/models') === opt.option
+                  return (
+                    <div
+                      key={opt.option}
+                      className={
+                        'flex items-center justify-between gap-3 rounded-md border p-3 transition-colors' +
+                        // The selected row is the one thing a scan must land on: accent border +
+                        // tinted fill, not just the (small, unstyled) native radio dot.
+                        (checked
+                          ? ' border-[color:var(--accent)] bg-[color:var(--accent)]/10'
+                          : ' border-border')
+                      }
+                    >
+                      <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
+                        <input
+                          type="radio"
+                          name="gateway-discovery-path"
+                          className="shrink-0"
+                          style={{ accentColor: 'var(--accent)' }}
+                          checked={checked}
+                          onChange={() => {
+                            if (opt.option === 'custom') {
+                              setCustomMode(true)
+                              patchGateway({ discoveryPath: customPath || '/v1/models' })
+                            } else {
+                              setCustomMode(false)
+                              setCustomPath('')
+                              patchGateway({
+                                discoveryPath: opt.option === '/v1/models' ? undefined : opt.option
+                              })
+                            }
+                          }}
+                        />
+                        <div className="min-w-0">
+                          <span
+                            className={
+                              checked
+                                ? 'font-mono text-[13px] font-medium text-text'
+                                : 'font-mono text-[13px] text-text'
+                            }
+                          >
+                            {opt.label}
+                          </span>
+                          <p className="text-[12px] text-muted">{opt.hint}</p>
+                        </div>
+                      </label>
+                    </div>
+                  )
+                })}
               </div>
             )
           })()}
