@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import {
   MODEL_GATEWAY_SECRET_REF,
   modelGatewayCredentialKind,
@@ -14,6 +14,11 @@ import { Select } from '@renderer/ui/Select'
 import { FieldRow } from '../FieldRow'
 import { SearchableRow } from '../SearchableRow'
 import { SettingsSection } from '../SettingsSection'
+import { SegmentedPill } from '@renderer/ui/SegmentedPill'
+
+/** The Model discovery endpoint picker. The first three write canonical gateway layouts; 'custom'
+ *  reveals a free-text path (see the onChange comment in the row body). */
+type DiscoChoice = 'v1-models' | 'openai' | 'anthropic' | 'custom'
 
 const ROWS = {
   endpoint: {
@@ -72,6 +77,13 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
     useState<ModelGatewayCredentialStatus | null>(null)
   const [credentialBusy, setCredentialBusy] = useState(false)
   const [credentialNotice, setCredentialNotice] = useState('')
+
+  // The "Model discovery endpoint" picker's transient editing state. The CURRENT value is read
+  // from `gateway.discoveryPath` every render (the source of truth), so a settings refresh keeps
+  // the pill in sync regardless of these locals — they only hold what the user is mid-typing.
+  const [customMode, setCustomMode] = useState(false)
+  const [customPath, setCustomPath] = useState('')
+  const [customChoice, setCustomChoice] = useState<DiscoChoice | null>(null)
   const routes = modelGatewayRoutes(gateway.baseUrl)
 
   const patchGateway = (patch: Partial<typeof gateway>): void => {
@@ -210,24 +222,67 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
 
       <SearchableRow {...ROWS.discoveryPath}>
         <FieldRow
-          label="Discovery path"
-          description="Where the OpenAI-compatible model catalogue lives on the gateway — appended to the root URL. Leave as /v1/models unless your gateway serves it elsewhere (e.g. /openai/v1/models)."
+          label="Model discovery endpoint"
+          description="Which gateway endpoint the model catalogue is read from. /v1/models is the OpenAI convention; /openai/v1/models and /anthropic/v1/models serve the same catalogue under a protocol prefix on some gateways. Only the discovery request changes — agent launches keep using the OpenAI and Anthropic launch routes below the Gateway URL."
           htmlFor="model-gateway-discovery-path"
           control={
-            <Input
-              id="model-gateway-discovery-path"
-              className="w-64 font-mono"
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="/v1/models"
-              value={gateway.discoveryPath ?? ''}
-              onChange={(e) => patchGateway({ discoveryPath: e.target.value })}
-            />
+            <div className="w-80 space-y-2">
+              <SegmentedPill<DiscoChoice>
+                ariaLabel="Model discovery endpoint"
+                value={
+                  gateway.discoveryPath && gateway.discoveryPath !== '/v1/models'
+                    ? 'custom'
+                    : 'v1-models'
+                }
+                options={[
+                  { value: 'v1-models', label: '/v1/models' },
+                  { value: 'openai', label: '/openai/v1/models' },
+                  { value: 'anthropic', label: '/anthropic/v1/models' },
+                  { value: 'custom', label: 'Custom path…' }
+                  ]}
+                onChange={(choice) => {
+                  // The Custom option reveals a free-text path so an unknown-to-this-picker
+                  // layout is still expressible; v1/openai/anthropic write the canonical paths.
+                  // `undefined` (not '' or null) is the "use the conventional /v1/models" spelling
+                  // on ModelGatewaySettings.discoveryPath.
+                  if (choice === 'custom') {
+                    patchGateway({ discoveryPath: customPath || '/v1/models' })
+                    setCustomMode(true)
+                  } else {
+                    patchGateway({
+                      discoveryPath:
+                        choice === 'openai'
+                          ? '/openai/v1/models'
+                          : choice === 'anthropic'
+                            ? '/anthropic/v1/models'
+                            : undefined
+                    })
+                    setCustomMode(false)
+                    setCustomPath('')
+                  }
+                  setCustomChoice(choice)
+                }}
+              />
+              {(customMode || customChoice === 'custom') && (
+                <Input
+                  id="model-gateway-discovery-path"
+                  className="w-64 font-mono"
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="/v1/models"
+                  value={customPath}
+                  onChange={(e) => {
+                    setCustomPath(e.target.value)
+                    patchGateway({ discoveryPath: e.target.value || undefined })
+                  }}
+                />
+              )}
+            </div>
           }
         />
         {gateway.discoveryPath && !routes ? (
-          <p className="mt-2 text-right text-xs text-[color:var(--warn)]">
+          <p className="text-right text-xs text-[color:var(--warn)]">
             The path is ignored — fix the gateway URL above first.
           </p>
         ) : null}
