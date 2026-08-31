@@ -21,6 +21,11 @@ const ROWS = {
     description: 'One gateway root URL for OpenAI-compatible discovery and agent routes.',
     keywords: ['openai compatible', 'bifrost', 'litellm', 'model', 'provider', 'base url', 'endpoint']
   },
+  discoveryPath: {
+    title: 'Discovery path',
+    description: 'Path the model catalogue is read from, appended to the gateway root.',
+    keywords: ['discover', 'models route', 'v1/models', 'openai/v1/models', 'catalogue path']
+  },
   key: {
     title: 'API key',
     description: 'A gateway bearer key from protected storage or an environment variable.',
@@ -200,6 +205,31 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
             <div>OpenAI: {routes.openai}</div>
             <div>Anthropic: {routes.anthropic}</div>
           </div>
+        ) : null}
+      </SearchableRow>
+
+      <SearchableRow {...ROWS.discoveryPath}>
+        <FieldRow
+          label="Discovery path"
+          description="Where the OpenAI-compatible model catalogue lives on the gateway — appended to the root URL. Leave as /v1/models unless your gateway serves it elsewhere (e.g. /openai/v1/models)."
+          htmlFor="model-gateway-discovery-path"
+          control={
+            <Input
+              id="model-gateway-discovery-path"
+              className="w-64 font-mono"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="/v1/models"
+              value={gateway.discoveryPath ?? ''}
+              onChange={(e) => patchGateway({ discoveryPath: e.target.value })}
+            />
+          }
+        />
+        {gateway.discoveryPath && !routes ? (
+          <p className="mt-2 text-right text-xs text-[color:var(--warn)]">
+            The path is ignored — fix the gateway URL above first.
+          </p>
         ) : null}
       </SearchableRow>
 
