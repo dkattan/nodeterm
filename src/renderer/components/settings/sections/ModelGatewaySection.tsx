@@ -263,10 +263,15 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
                     { option: 'custom', label: 'Custom path…', hint: 'Enter an exact path below.' }
                   ] as const
                 ).map((opt) => {
+                  // Custom is a MODE, not a stored alias value: `customMode` (this render
+                  // session's Custom selection) OR a persisted non-canonical path claims the
+                  // custom row. A custom seed of '/v1/models' before typing must NOT light the
+                  // first row — checked is single-owner: while customMode, the canonical rows
+                  // never light, whatever the field currently contains.
                   const checked =
                     opt.option === 'custom'
-                      ? isCustomValue
-                      : (gateway.discoveryPath ?? '/v1/models') === opt.option
+                      ? customMode || isCustomValue
+                      : !customMode && !isCustomValue && (gateway.discoveryPath ?? '/v1/models') === opt.option
                   return (
                     <div
                       key={opt.option}
@@ -288,8 +293,12 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
                           checked={checked}
                           onChange={() => {
                             if (opt.option === 'custom') {
+                              // Seed the input with the CURRENT stored path (or the conventional
+                              // default) so the box never shows empty over a live value. The
+                              // stored path is NOT rewritten here — Custom is only a mode until
+                              // the input itself is edited.
                               setCustomMode(true)
-                              patchGateway({ discoveryPath: customPath || '/v1/models' })
+                              setCustomPath(gateway.discoveryPath ?? '/v1/models')
                             } else {
                               setCustomMode(false)
                               setCustomPath('')
