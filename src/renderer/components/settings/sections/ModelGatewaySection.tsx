@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent } from 'react'
+import { useEffect, useState } from 'react'
 import {
   MODEL_GATEWAY_SECRET_REF,
   modelGatewayCredentialKind,
