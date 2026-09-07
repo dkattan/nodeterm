@@ -4,7 +4,13 @@
  * model list without losing the conversation. Kept free of DOM/IPC so the node menu, the bulk
  * filter and the restart choreography can all share exactly one set of rules.
  */
-import { canResume, canResumeWith, capabilityAgentId, resumeCommand } from '../../shared/agents/config'
+import {
+  canResume,
+  canResumeWith,
+  capabilityAgentId,
+  resumeCommand,
+  type AgentId
+} from '../../shared/agents/config'
 import { isShellCommand } from '@shared/agents/pane'
 import {
   DELIVERY_ATTEMPTS,
@@ -32,7 +38,8 @@ const EXIT_SEQUENCES: Record<string, string> = {
   claude: '/exit',
   codex: '/quit',
   grok: '/quit',
-  gemini: '/quit'
+  gemini: '/quit',
+  copilot: '/exit'
 }
 
 export function exitSequence(agentId: string): string | null {
@@ -73,6 +80,18 @@ export function restartEligibility(
   // Without a provider session id there is nothing to resume into.
   if (!sessionId) return { ok: false, reason: 'no-session' }
   return { ok: true }
+}
+
+/**
+ * Prefer the live hook-reported id, then the caller-chosen id persisted on the node. Copilot and
+ * modern Claude can start with a minted id before their first hook lands; making each menu/closure
+ * rediscover this fallback separately would make one of them offer a restart that the other
+ * refuses. `restartEligibility` remains the interpolation guard for the chosen value.
+ */
+export function restartSessionId(live: unknown, persisted: unknown): string | undefined {
+  if (typeof live === 'string' && live.trim()) return live.trim()
+  if (typeof persisted === 'string' && persisted.trim()) return persisted.trim()
+  return undefined
 }
 
 export type RestartOutcome = 'restarted' | 'exit-timeout' | 'not-eligible'
@@ -385,15 +404,15 @@ const inFlight = new Set<string>()
  * does not count — so a doubled request is neither counted twice as restarted nor reported as a
  * failure the user could act on. (The alternative, a fifth outcome, would break that frozen line.)
  */
-export function guardConcurrentRestart<T extends string>(
+export function guardConcurrentRestart<T extends string, Args extends unknown[]>(
   nodeId: string,
-  fn: () => Promise<T>
-): () => Promise<T | 'not-eligible'> {
-  return async () => {
+  fn: (...args: Args) => Promise<T>
+): (...args: Args) => Promise<T | 'not-eligible'> {
+  return async (...args: Args) => {
     if (inFlight.has(nodeId)) return 'not-eligible'
     inFlight.add(nodeId)
     try {
-      return await fn()
+      return await fn(...args)
     } finally {
       // Released on rejection too: a transport that threw once must not leave the node
       // permanently un-restartable for the rest of the app's run.
@@ -403,17 +422,35 @@ export function guardConcurrentRestart<T extends string>(
 }
 
 // ── Node registry (same park-surviving pattern as TerminalNode's restartSubs) ────────────
-const restartFns = new Map<string, () => Promise<RestartOutcome>>()
+// The closure's optional args select what kind of restart:
+//  - no args                  → plain "Restart agent": quit + resume the SAME agent in the SAME shell.
+//  - `targetAgentId`          → "Reopen session as <variant>": quit + resume the SAME session id
+//                               under a same-base agent's binary (the id is harness-portable within
+//                               a base; see lib/reopenVariants.ts).
+//  - `targetModel`            → switch the gateway model: quit + RECYCLE the tmux session so a fresh
+//                               shell spawns with the new gateway env, then the agent auto-resumes.
+//  - `restartShell: true`     → "Restart agent and shell": quit + RECYCLE for a FRESH shell (picks up
+//                               profile/env changes the same-shell restart cannot) keeping the SAME
+//                               agent + model, then the agent auto-resumes. The recycle-after-exit
+//                               mechanism is the one a model switch already uses, exposed as its own
+//                               action for the "I changed my .zshrc" case.
+export type AgentRestartFn = (
+  targetAgentId?: AgentId,
+  targetModel?: string,
+  restartShell?: boolean
+) => Promise<RestartOutcome>
+
+const restartFns = new Map<string, AgentRestartFn>()
 
 /** Register a node's restart closure; returns an unregister that is inert if superseded. */
-export function registerAgentRestart(nodeId: string, fn: () => Promise<RestartOutcome>): () => void {
+export function registerAgentRestart(nodeId: string, fn: AgentRestartFn): () => void {
   restartFns.set(nodeId, fn)
   return () => {
     if (restartFns.get(nodeId) === fn) restartFns.delete(nodeId)
   }
 }
 
-export function agentRestartFn(nodeId: string): (() => Promise<RestartOutcome>) | undefined {
+export function agentRestartFn(nodeId: string): AgentRestartFn | undefined {
   return restartFns.get(nodeId)
 }
 

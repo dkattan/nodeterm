@@ -56,6 +56,43 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       assembleLaunchCommand({ agentId: 'opencode', initialPrompt: 'fix it' }, ENV).command
     ).toBe("opencode --prompt 'fix it'")
   })
+  it('Copilot keeps an initial prompt interactive', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'copilot',
+          initialPrompt: 'fix it',
+          sessionId: 'abc-123',
+          sessionIdFlagSupported: true
+        },
+        ENV
+      ).command
+    ).toBe("copilot --interactive 'fix it' --session-id=abc-123")
+  })
+  it('adds a safely quoted model override after the ordinary Claude launch flags', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'claude',
+          initialPrompt: 'fix',
+          permissionMode: 'plan',
+          model: 'anthropic/claude-sonnet-4'
+        },
+        ENV
+      ).command
+    ).toBe("claude 'fix' --permission-mode plan --model 'anthropic/claude-sonnet-4'")
+  })
+})
+
+describe('assembleResumeCommand — Copilot', () => {
+  it('uses Copilot resume grammar while leaving a gateway model to the environment', () => {
+    expect(
+      assembleResumeCommand(
+        { agentId: 'copilot', sessionId: 'abc-123', model: 'openai/gpt-5.5' },
+        ENV
+      ).command
+    ).toBe('copilot --resume=abc-123')
+  })
 })
 
 describe('assembleLaunchCommand — custom agents', () => {
@@ -73,6 +110,37 @@ describe('assembleLaunchCommand — custom agents', () => {
     // args are expanded + each token quoted; flags appended like claude.
     expect(r.command).toBe("claude-wopr '--model' 'sonnet' 'fix' --permission-mode auto --session-id s1")
     expect(r.missingEnv).toEqual([])
+  })
+  it('a claude-base agent with a stale flag-prompt emits a POSITIONAL, not --prompt', () => {
+    // Regression: a custom agent with baseAgent:'claude' + a stale promptInjectionMode:'flag-prompt'
+    // must NOT emit `--prompt` (claude rejects it). The harness's argv grammar wins.
+    setCustomAgentBaseResolver((id) => (id === 'custom:stale' ? 'claude' : undefined))
+    const stale: CustomAgent = {
+      id: 'custom:stale',
+      label: 'Stale',
+      launchCmd: 'claude-wopr',
+      baseAgent: 'claude',
+      promptInjectionMode: 'flag-prompt'
+    }
+    const r = assembleLaunchCommand(
+      { agentId: 'custom:stale', customAgent: stale, initialPrompt: 'read the handoff file' },
+      ENV
+    )
+    expect(r.command).toContain("'read the handoff file'")
+    expect(r.command).not.toContain('--prompt')
+  })
+  it('a base-agent proxy inherits model-switch command grammar', () => {
+    setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'custom:proxy',
+          customAgent: { ...claudeProxy, args: '' },
+          model: 'anthropic/claude-opus'
+        },
+        ENV
+      ).command
+    ).toBe("claude-wopr --model 'anthropic/claude-opus'")
   })
   it('expands ${env:…} in args and reports missing vars', () => {
     setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
@@ -99,6 +167,14 @@ describe('assembleResumeCommand', () => {
     expect(assembleResumeCommand({ agentId: 'codex', sessionId: 'abc-123' }, ENV).command).toBe(
       'codex resume abc-123'
     )
+  })
+  it('puts the model flag in the measured Codex resume grammar', () => {
+    expect(
+      assembleResumeCommand(
+        { agentId: 'codex', sessionId: 'abc-123', model: 'openai/gpt-5' },
+        ENV
+      ).command
+    ).toBe("codex resume abc-123 --model 'openai/gpt-5'")
   })
   it('falls back to the bare launch command when there is no session id', () => {
     expect(assembleResumeCommand({ agentId: 'claude' }, ENV).command).toBe('claude')

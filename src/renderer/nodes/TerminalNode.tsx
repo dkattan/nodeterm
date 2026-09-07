@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import {
   Handle,
   NodeResizer,
@@ -111,6 +112,7 @@ import {
   registerAgentHibernate,
   registerAgentRestart,
   restartEligibility,
+  restartSessionId,
   RESTART_EXIT_TIMEOUT_MS,
   type ExitPhaseOutcome,
   type ResumePhaseOutcome
@@ -141,9 +143,24 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, agentConfig } from '@shared/agents/config'
+import {
+  hasHooks,
+  canRecur,
+  canContextLink,
+  hasUsage,
+  canChat,
+  canResume,
+  canRename,
+  canReadTitle,
+  createdAgentId,
+  reportsOwnCopy,
+  agentConfig,
+  capabilityAgentId,
+  type AgentId
+} from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleResumeCommand } from '@shared/agents/launch'
+import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -2415,6 +2432,7 @@ export function TerminalNode({
           cwd: data.cwd,
           persistKey: id,
           agentId: data.agentId,
+          agentModel: data.agentModel,
           accountId: data.accountId,
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
@@ -2778,7 +2796,14 @@ export function TerminalNode({
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
           const { command: cmd } = assembleResumeCommand(
-            { agentId, customAgent, sessionId: priorId || undefined, permissionMode: mode, sharedIdentity: shared },
+            {
+              agentId,
+              customAgent,
+              sessionId: priorId || undefined,
+              permissionMode: mode,
+              model: data.agentModel,
+              sharedIdentity: shared
+            },
             {}
           )
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
@@ -2832,11 +2857,78 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-      guardConcurrentRestart(id, async () => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean) => {
         const st = useAgentStatus.getState().byId[id]
-        const agentSessionId = st?.sessionId
-        const gate = restartEligibility(agentId, st?.state, agentSessionId)
-        if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        const currentNode = getNode(id)
+        const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
+        // `data.agentId` can change after a successful same-base swap while this deliberately
+        // long-lived terminal effect stays mounted. Read the node NOW instead of trusting the
+        // value captured when the pane attached, or a later plain Restart would silently reopen
+        // the old agent again.
+        const sourceAgentId = createdAgentId(currentNode?.data)
+        const gate = restartEligibility(sourceAgentId, st?.state, agentSessionId)
+        if (!gate.ok || !sourceAgentId || !agentSessionId || !restartTarget())
+          return 'not-eligible'
+        const target = targetAgentId ?? sourceAgentId
+        const settings = useSettings.getState().settings
+        const builtinTarget = agentConfig(target)
+        const customTarget = builtinTarget
+          ? undefined
+          : settings.customAgents.find((c) => c.id === target)
+        // Session ids are provider-specific. A stale context menu (or settings edit while it is
+        // open) must never feed a Claude id to Codex, nor launch a custom agent that was deleted.
+        if (
+          (!builtinTarget && !customTarget) ||
+          capabilityAgentId(target) !== capabilityAgentId(sourceAgentId)
+        )
+          return 'not-eligible'
+        const selectedModel = targetModel
+          ? normalizedAgentModel(target, targetModel)
+          : normalizedAgentModel(
+              target,
+              getNode(id)?.data.agentModel as string | undefined
+            )
+        // A model switch must rebuild the terminal session: URL/key env was fixed when that shell
+        // was spawned and may have been configured AFTER this node was created. Do not type the
+        // harness's slash-exit command here — an agent composer can treat it as prompt text. Core
+        // instead SIGTERMs the pane's foreground non-shell process group, then recycling gives the
+        // replacement shell the current gateway env. Relay sessions belong to another
+        // core/settings store, so a local gateway must never be pushed into one.
+        if (targetModel) {
+          if (!selectedModel || session.source === 'relay') return 'not-eligible'
+          if (!(await api.pty.terminateForeground(id))) return 'not-eligible'
+          transport.recycle(id)
+          updateNodeData(id, (node) => ({
+            agentId: target,
+            agentModel: selectedModel,
+            respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
+          }))
+          return 'restarted'
+        }
+        // "Restart agent and shell": same quit + recycle as a model switch, but the agent and model
+        // are UNCHANGED — the point is a FRESH shell that re-sources the user's profile/env (a
+        // change to .zshrc, or an env var set after this node was created), which typing the resume
+        // line into the existing shell never picks up. The respawn's cold-restore auto-resume
+        // relaunches the agent (`--resume <sid>`), so the conversation continues in the fresh shell.
+        // Relay sessions are excluded for the same reason a model switch is: their shell env belongs
+        // to another core/settings store, and recycling here would respawn against this Mac's env.
+        if (restartShell) {
+          if (session.source === 'relay') return 'not-eligible'
+          const exited = await performExitPhase({
+            agentId: target,
+            sessionId: agentSessionId,
+            io: restartIo,
+            paneCommand: () => api.pty.paneCommand(id),
+            isLive: restartTarget
+          })
+          if (exited !== 'exited') return exited
+          transport.recycle(id)
+          updateNodeData(id, (node) => ({
+            agentId: target,
+            respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
+          }))
+          return 'restarted'
+        }
         // Built HERE, not inside the choreography: the shared assembly builder is the single funnel
         // for every CLI launch path (shared/agents/launch.ts) and the mode is a renderer-side, async
         // read — exactly as the cold-restore relaunch above does it. Without it a canvas running
@@ -2844,20 +2936,29 @@ export function TerminalNode({
         // Re-resolved at call time for the same reason as there: the mode is a property of how a
         // session is launched, not of the node. Inheritance-aware: a custom agent's baseAgent/args
         // are re-applied so a restart of a claude-base proxy resumes correctly.
-        const customAgent = agentConfig(agentId)
-          ? undefined
-          : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
-        const { command } = assembleResumeCommand(
+        // Launch-command / args substitutions must use the host that owns this pane. `api` is
+        // session-scoped, so a relay tab asks its host rather than expanding against this Mac.
+        const launchEnv = customTarget
+          ? await api.agent.envSnapshot().catch(() => ({}))
+          : {}
+        const { command, missingEnv } = assembleResumeCommand(
           {
-            agentId,
-            customAgent,
+            agentId: target,
+            customAgent: customTarget,
             sessionId: agentSessionId,
-            permissionMode: await ensureActivePermissionMode(agentId)
+            permissionMode: await ensureActivePermissionMode(target),
+            model: selectedModel ?? undefined
           },
-          {}
+          launchEnv
         )
+        // Never type a knowingly mangled launch line (for example `--token ''`) into the pane.
+        // Settings already surfaces these missing names in its preview; a stale menu after an env
+        // change degrades to the ordinary not-eligible notice and leaves the shell untouched.
+        if (missingEnv.length) return 'not-eligible'
         return performRestartResume({
-          agentId,
+          // Source and target were proven to share one capability base above, so this resolves to
+          // the same exit + resume grammar while the explicit command selects the target binary.
+          agentId: target,
           sessionId: agentSessionId,
           io: restartIo,
           // An unusable session id leaves this undefined and performRestartResume refuses the
@@ -3969,7 +4070,7 @@ export function TerminalNode({
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
-      <NodeResizer minWidth={260} minHeight={160} isVisible={selected && !collapsed} color="#0a84ff" />
+      <NodeResizer minWidth={NODE_MIN_SIZES.terminal.width} minHeight={NODE_MIN_SIZES.terminal.height} isVisible={selected && !collapsed} color="#0a84ff" />
       {/* Invisible source handle so edges to subagent/loop nodes can attach. */}
       <Handle
         id="flow-out"

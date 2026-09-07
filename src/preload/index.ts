@@ -74,6 +74,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
     paneCommand: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey),
+    terminateForeground: (persistKey) =>
+      ipcRenderer.invoke(IPC.ptyTerminateForeground, persistKey),
     readSessionName: (sessionId, accountId, agentId) =>
       ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId, agentId),
     onData: (sessionId, listener) => {
@@ -439,7 +441,12 @@ const api: NodeTerminalApi = {
   },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
-    previewCommand: (inputs) => ipcRenderer.invoke(IPC.agentPreviewCommand, inputs)
+    previewCommand: (inputs) => ipcRenderer.invoke(IPC.agentPreviewCommand, inputs),
+    discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings),
+    gatewayCredentialStatus: () => ipcRenderer.invoke(IPC.agentGatewayCredentialStatus),
+    saveGatewayCredential: (apiKey) =>
+      ipcRenderer.invoke(IPC.agentGatewayCredentialSave, apiKey),
+    clearGatewayCredential: () => ipcRenderer.invoke(IPC.agentGatewayCredentialClear)
   },
   chat: {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
@@ -566,6 +573,10 @@ const api: NodeTerminalApi = {
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
   onZoomActualSize: subscribe(IPC.appZoomActualSize),
+  // Native View menu → renderer.
+  onToggleAutoAlign: subscribe(IPC.appToggleAutoAlign),
+  onFitView: subscribe(IPC.appFitView),
+  onToggleKanban: subscribe(IPC.appToggleKanban),
   onOpenSettings: subscribe(IPC.appOpenSettings),
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
   focusWindow: () => ipcRenderer.send(IPC.appFocusWindow),
