@@ -1,10 +1,11 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
-import { agentConfig, mintsSessionId, withSessionId } from '@shared/agents/config'
-import { withPermissionMode } from '@shared/agents/approval-mode'
+import { agentConfig, mintsSessionId } from '@shared/agents/config'
+import { assembleLaunchCommand } from '@shared/agents/launch'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
+import { codexSharedIdentity } from './codexIdentity'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
@@ -129,14 +130,37 @@ export interface NodeData {
 /** React Flow node type string mirrors the persisted NodeKind. */
 export type CanvasNode = Node<NodeData, NodeKind>
 
-/** Single-quote a string for safe use as one shell argument (POSIX). */
-export function shellSingleQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`
+/** Single-quote a string for safe use as one shell argument (POSIX).
+ *  Imported from `@shared/shell-quote` so the renderer and the shared command-assembly layer share
+ *  one definition, and re-exported so the renderer keeps its historical import path. */
+import { shellSingleQuote } from '@shared/shell-quote'
+export { shellSingleQuote }
+
+/**
+ * 8 hex characters of CSPRNG — the unique tail of every node and project id.
+ *
+ * It replaces a module-level `let idCounter = 0`, which was a latent collision generator: the
+ * counter restarted at 0 on every renderer start AND on every HMR reload, so `term-<ms36>-1` was
+ * minted again and again and only `Date.now()` (millisecond resolution) kept the ids apart. A node
+ * id IS the tmux session name and the persistence key, so a repeat means two nodes co-attached to
+ * one terminal.
+ *
+ * Kept inside `[A-Za-z0-9._-]` and short, because these ids become tmux session names and are
+ * charset-validated on several paths (tmux-naming, hook-server, codex-identity-proxy,
+ * project-node-append). No `Math.random()`: bulk flows (duplicate, "spawn a team") mint many ids in
+ * one tick, which is exactly where a weak generator repeats.
+ */
+function randomToken(): string {
+  const c = globalThis.crypto as Crypto | undefined
+  if (c?.getRandomValues) {
+    return Array.from(c.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  // Non-browser, non-Node-19 fallback (never taken in the app or in tests): still 8 chars.
+  return Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0')
 }
 
-let idCounter = 0
 function nextId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${++idCounter}`
+  return `${prefix}-${Date.now().toString(36)}-${randomToken()}`
 }
 
 /** Stagger placement so new nodes don't overlap. */
@@ -337,33 +361,7 @@ export function createAgentNode(
   accountId?: string,
   permissionMode?: AgentPermissionMode
 ): CanvasNode {
-  const { label, color, launchCmd } = resolveAgent(agentId)
-  const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
-  // A flag-prompt agent (opencode) takes the initial prompt via its flag — a bare positional
-  // would be misread (opencode treats it as a project path). Everything else keeps the
-  // historical argv append, INCLUDING stdin-after-start agents (gemini has always launched
-  // via argv here; changing that is a separate decision).
-  const promptArg = initialPrompt
-    ? shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())
-    : null
-  // A CLI whose positional prompt shares its slot with subcommands needs a separator, or a
-  // one-word prompt runs as a command instead (grok: `grok version` prints the version, `grok --
-  // version` asks the model about "version"). Absent for everyone else, so their command line is
-  // byte-identical to what it was.
-  const sep = agentConfig(agentId)?.argvPromptSeparator
-  const isFlagPrompt = agentConfig(agentId)?.promptInjectionMode === 'flag-prompt'
-  // The separator only participates when there is actually a prompt to separate (no dangling `--`),
-  // and never for a flag-prompt agent, whose prompt is not a positional at all.
-  const usesSep = !!promptArg && !!sep && !isFlagPrompt
-  // `withPrompt` is the NO-separator shape, and only that: it is read at exactly one place below,
-  // in the `!usesSep` arm. Reaching it with a prompt and no flag-prompt mode means `sep` was falsy,
-  // so an inline `${sep ? … : ''}` here could only ever expand to '' — the separator's one home is
-  // the `usesSep` arm, which spells it out.
-  const withPrompt = promptArg
-    ? isFlagPrompt
-      ? `${baseCmd} --prompt ${promptArg}`
-      : `${baseCmd} ${promptArg}`
-    : baseCmd
+  const { label, color } = resolveAgent(agentId)
   // The session id is DECIDED here rather than learned from a hook later, so this node always has
   // something to resume with — see SESSION_ID_CAPABLE for the failure this closes. `uuid()` (not
   // crypto.randomUUID) because the Server Edition serves plain HTTP on a LAN, where randomUUID is
@@ -372,29 +370,46 @@ export function createAgentNode(
   // Gated on the CLI actually advertising `--session-id`, because an unknown flag does not degrade
   // — it makes claude exit, taking the launch with it. Unprobed or older CLI ⇒ no mint ⇒ the
   // command line stays byte-identical to what it has always been, and the node falls back to
-  // learning its id from hooks exactly as before.
-  const mintedSessionId =
-    mintsSessionId(agentId) && claudeCliCapsNow().sessionIdFlag ? uuid() : undefined
-  // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
-  // Both flags ride the same helper so they land on the same side of an argv separator: for grok
-  // that is BEFORE `--` (end-of-options), and getting it wrong makes a flag part of the prompt.
-  const flagged = (cmd: string): string => {
-    const withMode = permissionMode ? withPermissionMode(cmd, agentId, permissionMode) : cmd
-    return mintedSessionId ? withSessionId(withMode, agentId, mintedSessionId) : withMode
+  // learning its id from hooks exactly as before. Inheritance-aware: a custom agent with
+  // baseAgent:'claude' mints an id too (capabilityAgentId resolves it to claude).
+  const cliCaps = claudeCliCapsNow()
+  const mintedSessionId = mintsSessionId(agentId) && cliCaps.sessionIdFlag ? uuid() : undefined
+  // Command assembly is delegated to the ONE shared builder (src/shared/agents/launch.ts), used by
+  // fresh launch AND cold-restore resume, so a custom agent's baseAgent/args/expansion are applied
+  // identically in both paths. The renderer has no process.env, so expansion here runs against an
+  // empty snapshot — but the FIRST-LAUNCH command typed into the shell only carries ${env:...} when
+  // the user put it in launchCmd/args, and the real env merge happens main-side in pty-manager
+  // (env values are injected as process env, NOT typed into the shell, so they never needed
+  // renderer-side expansion). For a builtin with no custom args this is byte-identical to the old
+  // hand-built command line.
+  const customAgent = agentConfig(agentId)
+    ? undefined
+    : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+  const { command: initialCommand, missingEnv } = assembleLaunchCommand(
+    {
+      agentId,
+      customAgent,
+      initialPrompt,
+      permissionMode,
+      sessionId: mintedSessionId,
+      sessionIdFlagSupported: cliCaps.sessionIdFlag,
+      // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
+      // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
+      // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
+      sharedIdentity: codexSharedIdentity(ssh)
+    },
+    // The renderer has no process.env; pass an empty record. ${env:...} in launchCmd/args resolves
+    // to empty here, but that only affects the TYPED command — env-var VALUES are injected as
+    // process env by pty-manager (main-side, against the real env), not typed into the shell.
+    {}
+  )
+  if (missingEnv.length) {
+    // A missing var in the typed command (launchCmd/args) would launch with a blank — surface it,
+    // matching the preview. Env-var VALUES (the env map) are merged main-side and warned there.
+    console.warn(
+      `[custom-agent] ${label}: ${missingEnv.map((m) => '${env:' + m + '}').join(', ')} unset in launch command — expanded to empty.`
+    )
   }
-  // WHERE the mode flag goes is decided by the agent's prompt convention, and the two conventions
-  // are opposites:
-  //  - No separator (claude): the prompt is a positional that must stay adjacent to the binary, so
-  //    the flag goes LAST — `claude 'fix the bug' --permission-mode auto`, byte-identical to what
-  //    nodeterm has always emitted.
-  //  - With a separator (grok): `--` means END OF OPTIONS, which is the whole reason it is there
-  //    (`grok -- version` sends "version" to the model instead of running the subcommand). By that
-  //    same convention anything AFTER it is a positional, so a flag appended last would either be
-  //    swallowed into the prompt text or rejected by clap as an unexpected argument — the setting
-  //    would silently do nothing, or the launch would die on a usage message. It therefore goes
-  //    BEFORE the separator: `grok --permission-mode plan -- 'explain this repo'`, matching grok's
-  //    own usage line `grok [OPTIONS] [PROMPT] [COMMAND]`.
-  const initialCommand = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
   const size = terminalNodeSize()
   return {
     id: nextId('term'),
@@ -411,7 +426,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Accounts are inherently Claude-only — never stamp one onto another agent's node.
+      // Accounts are inherently Claude-only — never stamp one onto another agent's node. A custom
+      // agent inheriting claude is still its own agent; account binding stays claude-the-builtin.
       ...(accountId && agentId === 'claude' ? { accountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
@@ -682,6 +698,10 @@ export function createGroupNode(
   return {
     id: nextId('group'),
     type: 'group',
+    // A frame is a background container, not a giant drag target: only its label pill drags it,
+    // so a click on the body reaches the pane (pan / rubber-band) and a NESTED frame's body is
+    // not stolen by its ancestor. Mirrored in `nodeStatesToFlow` for persisted frames.
+    dragHandle: '.group-node__label',
     position,
     width: size.width,
     height: size.height,
@@ -817,9 +837,118 @@ export function alignNodes(nodes: CanvasNode[], ids: string[], edge: AlignEdge):
 }
 
 /**
- * Wraps the given top-level node ids in a new group frame: creates the group sized to
- * enclose them and reparents the children (positions become relative to the group).
- * Returns a new nodes array with the group placed first (React Flow needs parents first).
+ * Group (parent) nodes must precede their descendants in the array (React Flow requirement).
+ * With nesting the old "all groups, then everything else" split is not enough — a child frame
+ * could still be emitted before its parent — so groups are emitted depth-first from the root.
+ *
+ * This order is also the DOWNGRADE contract: `flowToNodeStates` preserves array order, and an
+ * older build's flat `kind === 'group'` sort returns 0 for two groups, which a stable sort
+ * (ES2019+) leaves alone. So a nested tree written by this build still hydrates parent-first,
+ * and therefore still RENDERS, on a build that predates nesting.
+ */
+function groupsFirst(nodes: CanvasNode[]): CanvasNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const emitted = new Set<string>()
+  const visiting = new Set<string>()
+  const groups: CanvasNode[] = []
+  const emitGroup = (node: CanvasNode): void => {
+    if (emitted.has(node.id) || node.type !== 'group') return
+    if (visiting.has(node.id)) return // cyclic parentId: emit once, don't recurse forever
+    visiting.add(node.id)
+    const parent = node.parentId ? byId.get(node.parentId) : undefined
+    if (parent?.type === 'group') emitGroup(parent)
+    visiting.delete(node.id)
+    if (!emitted.has(node.id)) {
+      emitted.add(node.id)
+      groups.push(node)
+    }
+  }
+  nodes.forEach(emitGroup)
+  return [...groups, ...nodes.filter((node) => node.type !== 'group')]
+}
+
+/** A node's position in ROOT space: its own position plus every ancestor frame's origin. */
+function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number; y: number } {
+  const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]))
+  const seen = new Set<string>([node.id])
+  let x = node.position.x
+  let y = node.position.y
+  let parentId = node.parentId
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId)
+    const parent = byId.get(parentId)
+    if (!parent) break
+    x += parent.position.x
+    y += parent.position.y
+    parentId = parent.parentId
+  }
+  return { x, y }
+}
+
+function isDescendant(nodes: CanvasNode[], candidateId: string, ancestorId: string): boolean {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const seen = new Set<string>()
+  let current = byId.get(candidateId)
+  while (current?.parentId && !seen.has(current.parentId)) {
+    if (current.parentId === ancestorId) return true
+    seen.add(current.parentId)
+    current = byId.get(current.parentId)
+  }
+  return false
+}
+
+/**
+ * Returns only the selected subtree ROOTS. Box-selection routinely catches a frame together with
+ * its children; a structural action must move that subtree ONCE, through its selected ancestor,
+ * or the children are torn out of the frame that is being moved.
+ */
+export function selectedRootIds(nodes: CanvasNode[], ids: string[]): string[] {
+  const selected = new Set(ids)
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  return ids.filter((id) => {
+    let node = byId.get(id)
+    if (!node) return false
+    const seen = new Set<string>()
+    while (node.parentId && !seen.has(node.parentId)) {
+      if (selected.has(node.parentId)) return false
+      seen.add(node.parentId)
+      const parent = byId.get(node.parentId)
+      if (!parent) break
+      node = parent
+    }
+    return true
+  })
+}
+
+/**
+ * Grows every ancestor frame of `groupId` to hug its children again, innermost first. A frame
+ * that gained a child bigger than itself must be re-fitted BEFORE its own parent is, or the
+ * parent is fitted around a size that is about to change.
+ */
+function fitAncestorChain(nodes: CanvasNode[], groupId: string | undefined): CanvasNode[] {
+  let next = nodes
+  const seen = new Set<string>()
+  let currentId = groupId
+  while (currentId && !seen.has(currentId)) {
+    seen.add(currentId)
+    next = fitGroupToChildren(next, currentId)
+    currentId = next.find((n) => n.id === currentId)?.parentId
+  }
+  return next
+}
+
+/**
+ * Wraps nodes that share ONE container in a new group frame. The members may themselves be
+ * frames, so this is how a nested tree is built. The frame is created beside its members inside
+ * their current parent and every root-space position stays fixed. Mixed containers and
+ * ancestor+descendant selections are refused (their positions are not comparable, and the
+ * descendant would be torn out of the ancestor being wrapped).
+ *
+ * When the members live inside a parent frame, that parent (and its own ancestors) are re-fitted
+ * around the new wrapper. Without this the wrapper is created at `(minX - 28, minY - 62)` — often
+ * NEGATIVE — inside a parent that is by construction too small to hold it, and `extent: 'parent'`
+ * makes React Flow clamp it to `parentSize - wrapperSize`, i.e. hundreds of px off, dragging the
+ * whole wrapped subtree with it. Same trap `addGrouped` documents in Canvas.
  */
 export function groupSelectedNodes(
   nodes: CanvasNode[],
@@ -827,8 +956,17 @@ export function groupSelectedNodes(
   groupIndex: number
 ): CanvasNode[] {
   const set = new Set(ids)
-  const members = nodes.filter((n) => set.has(n.id) && !n.parentId && n.type !== 'group')
-  if (members.length === 0) return nodes
+  const members = nodes.filter((n) => set.has(n.id))
+  if (members.length === 0 || new Set(members.map((n) => n.parentId ?? null)).size !== 1) {
+    return nodes
+  }
+  if (
+    members.some((member) =>
+      members.some((other) => other.id !== member.id && isDescendant(nodes, other.id, member.id))
+    )
+  ) {
+    return nodes
+  }
 
   const minX = Math.min(...members.map((n) => n.position.x))
   const minY = Math.min(...members.map((n) => n.position.y))
@@ -842,9 +980,14 @@ export function groupSelectedNodes(
     { width: maxX - minX + GROUP_PAD * 2, height: maxY - minY + GROUP_PAD * 2 + GROUP_HEADER },
     groupIndex
   )
+  const parentId = members[0].parentId
+  if (parentId) {
+    group.parentId = parentId
+    group.extent = 'parent'
+  }
 
   const updated = nodes.map((n) =>
-    set.has(n.id) && !n.parentId && n.type !== 'group'
+    set.has(n.id)
       ? {
           ...n,
           parentId: group.id,
@@ -854,7 +997,7 @@ export function groupSelectedNodes(
         }
       : n
   )
-  return [group, ...updated]
+  return fitAncestorChain(groupsFirst([group, ...updated]), parentId)
 }
 
 /** Returns a copy of a node with a fresh id, offset position, and top-level placement. */
@@ -906,72 +1049,64 @@ export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): Canvas
   })
 }
 
-/** Removes a group frame and restores its children to absolute positions. */
+/**
+ * Removes a group frame, promoting its DIRECT children into the frame's own parent (the top
+ * level for an unnested frame) without moving them on canvas. A nested frame's children land in
+ * the grandparent, not at the root — sending them to the root would move them by the whole
+ * ancestor offset.
+ */
 export function ungroupNodes(nodes: CanvasNode[], groupId: string): CanvasNode[] {
   const group = nodes.find((n) => n.id === groupId)
-  if (!group) return nodes
-  return nodes
-    .filter((n) => n.id !== groupId)
-    .map((n) =>
-      n.parentId === groupId
-        ? {
-            ...n,
-            parentId: undefined,
-            extent: undefined,
-            position: { x: n.position.x + group.position.x, y: n.position.y + group.position.y }
-          }
-        : n
-    )
-}
-
-/**
- * Moves a node into an existing group frame (`groupId` set) or out to the top level
- * (`groupId` null), keeping its on-canvas position fixed by converting between absolute and
- * group-relative coordinates (one level of nesting). Returns a new array with group nodes kept
- * before their children (React Flow requires parents first). No-op when the node is missing or
- * is itself a group, when it already has the requested parent, or when `groupId` is not a group.
- */
-/** Group (parent) nodes must precede their children in the array (React Flow requirement). */
-function groupsFirst(nodes: CanvasNode[]): CanvasNode[] {
-  return [...nodes.filter((n) => n.type === 'group'), ...nodes.filter((n) => n.type !== 'group')]
+  if (!group || group.type !== 'group') return nodes
+  const parentId = group.parentId ?? null
+  const moved = nodes.map((node) =>
+    node.parentId === groupId ? repositionForParent(node, parentId, nodes) : node
+  )
+  return groupsFirst(moved.filter((node) => node.id !== groupId))
 }
 
 /**
  * Returns `node` repositioned for a new parent (`targetParentId`, or null for top level),
- * keeping its on-canvas position fixed via absolute↔relative conversion (one level). Returns
- * the node unchanged if the target group is missing or not a group.
+ * keeping its on-canvas position fixed via root↔relative conversion across arbitrary nesting
+ * (the old math added ONE parent's origin, which is wrong the moment frames nest). Returns the
+ * node unchanged if the target group is missing or not a group.
  */
 function repositionForParent(
   node: CanvasNode,
   targetParentId: string | null,
   nodes: CanvasNode[]
 ): CanvasNode {
-  const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
-  const abs = {
-    x: node.position.x + (oldParent?.position.x ?? 0),
-    y: node.position.y + (oldParent?.position.y ?? 0)
-  }
+  const abs = rootPosition(node, nodes)
   if (targetParentId === null) {
     return { ...node, parentId: undefined, extent: undefined, position: abs }
   }
   const group = nodes.find((n) => n.id === targetParentId)
   if (!group || group.type !== 'group') return node
+  const groupAbs = rootPosition(group, nodes)
   return {
     ...node,
     parentId: group.id,
     extent: 'parent' as const,
-    position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
+    position: { x: abs.x - groupAbs.x, y: abs.y - groupAbs.y }
   }
 }
 
+/**
+ * Moves a node — or a whole group subtree — into an existing frame (`groupId` set) or out to the
+ * top level (`groupId` null), keeping its root-space position fixed. Returns a new array with
+ * frames kept before their descendants (React Flow requires parents first). No-op when the node
+ * is missing, it already has the requested parent, the target is not a group, or the move would
+ * create a cycle (a frame cannot be parented into itself or into one of its own descendants).
+ */
 export function reparentNode(
   nodes: CanvasNode[],
   nodeId: string,
   groupId: string | null
 ): CanvasNode[] {
   const node = nodes.find((n) => n.id === nodeId)
-  if (!node || node.type === 'group') return nodes
+  if (!node) return nodes
   if ((node.parentId ?? null) === groupId) return nodes
+  if (groupId === nodeId || (groupId && isDescendant(nodes, groupId, nodeId))) return nodes
 
   const updated = repositionForParent(node, groupId, nodes)
   if (updated === node) return nodes // target group missing / not a group
@@ -979,10 +1114,78 @@ export function reparentNode(
 }
 
 /**
+ * Adds the selected objects to an existing frame. Only selected subtree ROOTS move — when a
+ * frame and one of its children are both selected, the child travels inside its frame rather
+ * than being torn out of it.
+ */
+export function addSelectionToGroup(
+  nodes: CanvasNode[],
+  selectedIds: string[],
+  groupId: string
+): CanvasNode[] {
+  if (!nodes.some((node) => node.id === groupId && node.type === 'group')) return nodes
+  const selected = new Set(selectedIds)
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const roots = nodes.filter((node) => {
+    if (node.id === groupId || !selected.has(node.id)) return false
+    const seen = new Set<string>()
+    let parentId = node.parentId
+    while (parentId && !seen.has(parentId)) {
+      if (selected.has(parentId)) return false
+      seen.add(parentId)
+      parentId = byId.get(parentId)?.parentId
+    }
+    return true
+  })
+  let next = nodes
+  for (const root of roots) next = reparentNode(next, root.id, groupId)
+  return next === nodes ? nodes : fitAncestorChain(next, groupId)
+}
+
+/**
+ * Reorders one group subtree among its siblings without changing its parent or its geometry.
+ * `beforeId = null` appends it after the last sibling. Descendants travel with their frame so
+ * the persisted parent-before-child order stays coherent.
+ */
+export function reorderGroupWithinParent<T extends { id: string; parentId?: string }>(
+  nodes: T[],
+  draggedId: string,
+  parentId: string | null,
+  beforeId: string | null
+): T[] {
+  if (draggedId === beforeId) return nodes
+  const dragged = nodes.find((node) => node.id === draggedId)
+  if (!dragged || (dragged.parentId ?? null) !== parentId) return nodes
+  const before = beforeId ? nodes.find((node) => node.id === beforeId) : undefined
+  if (beforeId && (!before || (before.parentId ?? null) !== parentId)) return nodes
+
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const belongsToDraggedSubtree = (node: T): boolean => {
+    if (node.id === draggedId) return true
+    const seen = new Set<string>()
+    let current = node
+    while (current.parentId && !seen.has(current.parentId)) {
+      if (current.parentId === draggedId) return true
+      seen.add(current.parentId)
+      const next = byId.get(current.parentId)
+      if (!next) return false
+      current = next
+    }
+    return false
+  }
+  const subtree = nodes.filter(belongsToDraggedSubtree)
+  const without = nodes.filter((node) => !belongsToDraggedSubtree(node))
+  const at = beforeId ? without.findIndex((node) => node.id === beforeId) : without.length
+  if (at < 0) return nodes
+  return [...without.slice(0, at), ...subtree, ...without.slice(at)]
+}
+
+/**
  * Moves `draggedId` to sit immediately before `beforeId` in the array (sidebar order follows
  * array order). The dragged node also joins `beforeId`'s container (same reposition math) so a
  * drop both reorders within a group and can move across groups. No-op when either node is
- * missing, they are the same, or the dragged node is a group.
+ * missing, they are the same, or the dragged node is a group (frames reorder through
+ * `reorderGroupWithinParent`, which keeps their whole subtree together).
  */
 export function reorderNodeBefore(
   nodes: CanvasNode[],
@@ -1008,12 +1211,10 @@ export function reorderNodeBefore(
 
 /** Converts persisted node states into live React Flow nodes (parents first). */
 export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
-  // React Flow requires a parent node to appear before its children in the array.
-  const ordered = [...states].sort((a, b) => {
-    if ((a.kind === 'group') === (b.kind === 'group')) return 0
-    return a.kind === 'group' ? -1 : 1
-  })
-  return ordered.map((raw) => {
+  // React Flow requires a parent node to appear before its children. With nested frames a flat
+  // "groups first" sort is not enough (two frames compare equal), so `groupsFirst` re-emits the
+  // frames depth-first from the root at the end of this function.
+  const mapped = states.map((raw) => {
     // The SDK chat node was removed (2026-07). A persisted chat node degrades into a sticky that
     // keeps its place and tells the user how to continue the conversation — chat sessions are
     // ordinary Claude sessions, resumable in any terminal. (position/size are normalized
@@ -1047,6 +1248,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       id: n.id,
       // Default to 'terminal' for nodes saved before the kind field existed.
       type: n.kind ?? 'terminal',
+      ...((n.kind ?? 'terminal') === 'group' ? { dragHandle: '.group-node__label' } : {}),
       position: n.position,
       width: n.size.width,
       height,
@@ -1082,6 +1284,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       }
     }
   })
+  return groupsFirst(mapped)
 }
 
 /** Serializes live React Flow nodes back into persisted node states. */

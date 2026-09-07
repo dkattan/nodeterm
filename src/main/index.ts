@@ -2,18 +2,27 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile } from 'fs/promises'
+import { existsSync, statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
+import { writeFilesToClipboard } from './clipboard-files'
 import { registerFsHandlers } from '../core/fs-handlers'
-import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import {
+  registerBrowserGuest,
+  type BrowserGuest,
+  type BrowserSurfaceKind
+} from './browser-guest-registry'
+import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { deliverFromControl, isDeliverRequest, onMessagingAgentEvent } from './agent-messaging'
 import type { RemoteLogExec } from '../core/board-log'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
+import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
@@ -33,6 +42,7 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
+import { installKeydownIntercepts } from './keydown-intercept'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -101,13 +111,16 @@ import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 import {
+  checkMasterArgs,
   childArgs,
+  controlPathFor,
   parseRemoteSessionNames,
   remoteListSessionsArgs,
   remotePaneCommandArgs
 } from '../core/remote-ssh/control-master'
+import { planRemoteWorkspacePoll } from './remote-workspace-poll'
 import { sessionName } from '../core/tmux-naming'
-import { posixQuote } from '../shared/ssh'
+import { posixQuote, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
@@ -122,6 +135,15 @@ import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
+import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
+import {
+  bindCodexThreadIdentity,
+  setCodexThreadIdentityAuthSecret,
+  writeCodexThreadIdentity
+} from '../core/codex-identity-proxy'
+import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
+import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
+import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import {
   isSafeLocalTranscriptPath,
@@ -263,7 +285,10 @@ const workspaceWatcher = new WorkspaceWatcher({
     })
   }
 })
-workspaceStore.onPersist = () => workspaceWatcher.sync()
+workspaceStore.onPersist = () => {
+  workspaceWatcher.sync()
+  refreshNodeTokens()
+}
 const gitService = new GitService()
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
@@ -308,8 +333,10 @@ let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 // True from the first before-quit on: lets window close-events through (see hide-on-close).
 let quitting = false
 
-// Browser <webview> guest webContents id → its browser node id (for new-window capture).
-const browserGuests = new Map<number, string>()
+// Browser <webview> guest webContents id → the browser node (and which of its two surfaces) it
+// belongs to. Used today for new-window capture; every entry is proven to BE a <webview> before it
+// lands here — see `registerBrowserGuest`.
+const browserGuests = new Map<number, BrowserGuest>()
 
 // Node → live tail bookkeeping, so closing a node (× → pty:destroy) releases its file tailers.
 // Without this, a node closed mid-run never emits SessionEnd/PostToolUse, so context-tail (1s
@@ -350,6 +377,112 @@ if (process.platform !== 'win32' && typeof process.setFdLimit === 'function') {
   } catch (e) {
     console.warn('[main] could not raise fd limit', e)
   }
+}
+
+/**
+ * The native application menu. macOS-idiomatic: the app-name menu (About/Quit) first, then an
+ * Edit menu with the standard text-editing roles (Undo/Redo/Cut/Copy/Paste/Select All — these
+ * make keyboard shortcuts work in inputs and the webview), then a Window menu, with a
+ * "Settings…" item (⌘,) in the app menu that opens the settings page.
+ *
+ * Until now the app shipped with Electron's DEFAULT menu (which has no Settings item, and whose
+ * Edit roles only covered the main webContents). The only way to reach Settings was the in-canvas
+ * gear button. This adds the menu entry Mac users look for reflexively (⌘, → app menu → Settings).
+ *
+ * The Settings item sends `IPC.appOpenSettings` to the renderer, which opens the same settings page
+ * the gear button and the Cmd+, keydown do — one IPC, the renderer owns the open/close state.
+ * `before-input-event` already routes a typed ⌘, to the renderer, so this menu item is what makes
+ * the MENU route (clicking the item, or focusing the menu bar and pressing ⌘,) reach the same
+ * place: a menu click does NOT fire before-input-event, so without this the menu would be inert.
+ */
+function buildAppMenu(): void {
+  const isMac = process.platform === 'darwin'
+  const settingsItem = {
+    label: isMac ? 'Settings…' : 'Settings',
+    accelerator: 'CmdOrCtrl+,',
+    click: () => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) win.webContents.send(IPC.appOpenSettings)
+    }
+  }
+  const template: Electron.MenuItemConstructorOptions[] = isMac
+    ? [
+        {
+          label: app.name,
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            settingsItem,
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' }
+          ]
+        },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { role: 'pasteAndMatchStyle' },
+            { role: 'delete' },
+            { role: 'selectAll' }
+          ]
+        },
+        {
+          label: 'View',
+          submenu: [{ role: 'toggleDevTools' }]
+        },
+        {
+          label: 'Window',
+          submenu: [
+            { role: 'minimize' },
+            { role: 'zoom' },
+            { type: 'separator' },
+            { role: 'front' }
+          ]
+        }
+      ]
+    : [
+        {
+          label: 'File',
+          submenu: [{ role: 'quit' }]
+        },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { role: 'delete' },
+            { role: 'selectAll' }
+          ]
+        },
+        {
+          label: 'View',
+          submenu: [{ role: 'toggleDevTools' }]
+        },
+        {
+          label: 'Settings',
+          submenu: [settingsItem]
+        },
+        {
+          label: 'Window',
+          submenu: [{ role: 'minimize' }, { role: 'close' }]
+        }
+      ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 function createWindow(): BrowserWindow {
@@ -456,21 +589,10 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  // Intercept Cmd/Ctrl+M (default = minimize) and route it to the renderer for the
-  // markdown-view toggle instead.
-  win.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown' || !(input.meta || input.control)) return
-    const key = input.key.toLowerCase()
-    if (key === 'm') {
-      event.preventDefault()
-      win.webContents.send(IPC.appToggleMarkdown)
-    } else if (key === 'w' && !input.shift) {
-      // Repurpose Cmd/Ctrl+W: the renderer closes the selected node(s); if none are
-      // selected it asks us to close the window (the standard behavior).
-      event.preventDefault()
-      win.webContents.send(IPC.appCloseNode)
-    }
-  })
+  // Steal ⌘M / ⌘W / ⌘0 back from Electron's default application menu (minimize / close /
+  // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
+  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test.
+  installKeydownIntercepts(win)
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered
@@ -515,7 +637,7 @@ app.whenReady().then(async () => {
     // (never a real popup). Only http(s); other schemes are dropped. The map is consulted
     // live at call time, so a guest registered later (on dom-ready) is seen when a popup fires.
     contents.setWindowOpenHandler(({ url }) => {
-      const sourceNodeId = browserGuests.get(contents.id)
+      const sourceNodeId = browserGuests.get(contents.id)?.nodeId
       if (sourceNodeId && /^https?:\/\//i.test(url)) {
         sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
       }
@@ -526,6 +648,8 @@ app.whenReady().then(async () => {
   settingsStore.init()
   settingsStore.registerIpc()
   sshStore.registerIpc()
+  // Custom-agent preview/expansion IPC (renderer has no process.env; expansion runs here).
+  registerAgentEnvIpc()
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
@@ -546,6 +670,7 @@ app.whenReady().then(async () => {
     process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
   )
   registerClaudeCliIpc()
+  registerCodexIdentityIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
@@ -565,9 +690,24 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.mediaAllow, (_e, absPath: string) => allowMediaPath(absPath))
   ipcMain.handle(IPC.mediaWriteHtml, (_e, html: string) => writeAgentHtml(html))
 
-  ipcMain.on(IPC.browserRegister, (_e, webContentsId: number, nodeId: string) => {
-    browserGuests.set(webContentsId, nodeId)
-  })
+  ipcMain.on(
+    IPC.browserRegister,
+    (_e, webContentsId: number, nodeId: string, surface?: BrowserSurfaceKind) => {
+      // `surface` is passed through UNCHANGED, including when it is absent. Both mount sites
+      // (BrowserNode and the kanban CardModal) still send two arguments, so today it is always
+      // absent — and defaulting it to 'canvas' here would record every modal guest as a canvas
+      // guest, which is a false claim a later reverse lookup cannot detect. See `BrowserGuest`.
+      if (
+        !registerBrowserGuest(browserGuests, webContentsId, nodeId, surface, (id) =>
+          webContents.fromId(id) ?? null
+        )
+      ) {
+        // Loud, because the symptom otherwise is "popups from this node stopped opening" with
+        // nothing anywhere to explain it.
+        console.warn('[browser] refused guest registration', { webContentsId, nodeId, surface })
+      }
+    }
+  )
   ipcMain.on(IPC.browserUnregister, (_e, webContentsId: number) => {
     browserGuests.delete(webContentsId)
   })
@@ -645,6 +785,13 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.clipboardWrite, (_e, text: string) => {
     if (typeof text === 'string') clipboard.writeText(text)
   })
+  ipcMain.handle(IPC.clipboardWriteFiles, (_e, paths: unknown) =>
+    writeFilesToClipboard(paths, {
+      platform: process.platform,
+      isFile: (path) => statSync(path).isFile(),
+      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer)
+    })
+  )
 
   // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
@@ -775,7 +922,12 @@ app.whenReady().then(async () => {
   // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
   // behaviour cannot drift. Registered on the platform, so a remote tab's Explorer/editor works.
-  registerFsHandlers(corePlatform)
+  // `localProjectCwd` is how a canvas image finds the project's own `.nodeterm/images/`. It
+  // answers undefined for an SSH project (its cwd is on the host, and the image node reads
+  // locally) and for a relay tab (not in this index at all) — both take the app-local fallback.
+  registerFsHandlers(corePlatform, {
+    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
+  })
 
   const githubSecret = new ElectronGitHubSecretStore(app.getPath('userData'), safeStorage)
   const github = registerGitHubIntegration({
@@ -827,12 +979,18 @@ app.whenReady().then(async () => {
     const ref = sshFsRefFor(projectId)
     return ref ? sshFs.exists(ref, p) : Promise.resolve(false)
   })
+  ipcMain.handle(IPC.sshFsQuickOpen, (_e, projectId: string, cwd: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.listQuickOpenFiles(ref, cwd) : Promise.resolve([])
+  })
 
   // Board-log: same CorePlatform registrar as the Server Edition (core/board-log-handlers.ts), with
   // a desktop router that adds SSH routing on top of the local-cwd/unsupported the server also does.
   // A connected SSH project (refForProject → a ref with a remoteCwd) reads/writes/fingerprints over
   // its ControlMaster; anything else falls to the local folder cwd, then unsupported.
-  registerBoardLogHandlers(corePlatform, {
+  // Extracted so the agent-messaging delivery trace can append THROUGH the same router the IPC
+  // handler uses (appendBoardLogVia) instead of restating the local/remote/unsupported decision.
+  const boardLogRouter = {
     route: (projectId: string): BoardLogRoute => {
       const ref = sshProjectManager?.refForProject(projectId)
       if (ref?.remoteCwd) {
@@ -860,6 +1018,31 @@ app.whenReady().then(async () => {
       if (cwd) return { kind: 'local', cwd }
       return { kind: 'unsupported' }
     }
+  }
+  registerBoardLogHandlers(corePlatform, boardLogRouter)
+
+  // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
+  // here; everything that authorizes or performs the delivery reads MAIN's stores. See
+  // src/main/agent-messaging.ts for the whole map.
+  ipcMain.handle(IPC.agentMessageDeliver, async (_e, raw: unknown) => {
+    if (!isDeliverRequest(raw))
+      return { ok: false, error: 'malformed agent-message request. Do not retry.' }
+    const { reply } = await deliverFromControl(raw, {
+      paneOwner: (id) => ptyManager.paneOwner(id),
+      sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
+      hasLiveSession: (id) => ptyManager.hasLiveSession(id),
+      projects: () => workspaceStore.persistedCanvases(),
+      isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
+      // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch, OFF by
+      // default. The switch itself (Project/ProjectFileV1 `agentMessaging`, validated `=== true`
+      // against a hostile project.json, plus the Settings row) is PR 6 — until it lands, nothing
+      // can turn messaging on, and every delivery answers `notPermitted (switch-off)`. PR 6
+      // replaces this closure with the validated read; it must not weaken the `=== true` rule.
+      messagingEnabled: () => false,
+      customAgents: () => settingsStore.get().customAgents,
+      appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
+    })
+    return reply
   })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
@@ -880,6 +1063,58 @@ app.whenReady().then(async () => {
   // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
+  // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
+  // One secret does two jobs: it arms the hook server's per-node capability (closing the "shared
+  // bearer can name any sibling node" hole) and it signs the codex thread → node records the hook
+  // prelude reads back. On the desktop it is sealed via safeStorage; if secure storage is
+  // unavailable the load rejects and we FAIL OPEN — identity stays unavailable (legacy mode),
+  // `codexIdentityCaps()` answers `shared: false`, every launch line stays the bare `codex`, and
+  // nothing is half-armed. Never throws up the boot path.
+  // The escape hatch for per-route enforcement, read LIVE so flipping it in Settings takes effect
+  // on the next request. Wired OUTSIDE the try: it is not part of arming the secret, and a machine
+  // running in legacy mode is precisely one whose owner may need it.
+  hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
+  try {
+    const nodeAuthSecret = await loadOrCreateNodeAuthSecret()
+    hookServer.setNodeAuthSecret(nodeAuthSecret)
+    // Keep signing bound codex thread records with the same secret so they keep verifying.
+    setCodexThreadIdentityAuthSecret(nodeAuthSecret)
+    // Materialise a token file for every node in every persisted project. This is what makes the
+    // upgrade invisible: an already-running session becomes verified at its next hook event, no
+    // restart. Safe if the secret is absent — the service no-ops into legacy mode.
+    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
+  } catch (error) {
+    console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
+  }
+  // Probes the CLI for `--remote`, installs the launcher, and publishes the construction-time
+  // answer. MUST stay after the secret above and before the window: it is what unblocks
+  // `codexIdentityCaps()`, which the renderer's first Codex launch line waits on. NOT awaited —
+  // the probe is a login-shell lookup plus up to two `--help` spawns, and nothing in the boot
+  // chain should queue behind it; callers of `codexIdentityCaps()` wait for it instead of being
+  // told "no". Reordering it later only delays that answer; leaving it out would stall those
+  // callers until their own timeout, so it is not optional.
+  void refreshCodexIdentityCaps()
+  hookServer.setCodexIdentityListener((ev) => sendToMain(IPC.codexIdentity, ev))
+  // A node still on a canvas is "live". A thread whose recorded owner is gone (node deleted, or a
+  // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
+  // not, and the launcher then falls back rather than putting two clients on one conversation.
+  const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint }) => {
+    const threadId = await startCodexThread(cwd)
+    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint)
+    return threadId
+  })
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint }) => {
+    // Ask the app-server whether this conversation exists BEFORE recording that a node owns it.
+    // The id reaching us is whatever the node persisted — it can be stale, or from a session that
+    // ran under plain codex and the shared server has never heard of. Binding it anyway writes a
+    // record and then execs `codex --remote unix:// resume <id>`, which dies with "no rollout
+    // found" AFTER exec, where nothing can fall back any more. Refusing here IS the fallback.
+    if (!(await codexThreadExists(threadId))) {
+      throw new Error('Codex thread is unknown to the shared app-server')
+    }
+    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive)
+  })
   // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
   // passphrase-protected identity file's prompt back through the app instead of failing auth.
   // MUST NOT be fatal: binding a unix socket under ~/.nodeterm can fail for filesystem reasons
@@ -891,6 +1126,7 @@ app.whenReady().then(async () => {
     console.error('[ssh-askpass] script generation failed, relay disabled:', e)
     return undefined
   })
+  buildAppMenu()
   const win = createWindow()
   // NT_MULTI instances are throwaway dev sandboxes. The dock badge is the one marker that is
   // always visible on macOS (the window title is hidden by titleBarStyle: 'hiddenInset', and the
@@ -1004,14 +1240,21 @@ app.whenReady().then(async () => {
   let pushHasPairedPhone = false
   const refreshPushIdentity = async (): Promise<void> => {
     try {
-      pushHostKeyB64 = publicKeyToB64((await loadOrCreateKeyPair()).publicKey)
-    } catch {
-      // Keyring locked / transient read error: keep the last-known key (never clobber identity).
-    }
-    try {
       pushHasPairedPhone = (await loadApprovedDevices()).pubkeys.length > 0
     } catch {
       pushHasPairedPhone = false
+    }
+    // No paired destination means no host-mode push can be sent. Avoid touching macOS
+    // Safe Storage at boot in that state: locally signed development builds otherwise trigger
+    // a Keychain ACL prompt even though there is nobody to notify.
+    if (!pushHasPairedPhone) {
+      pushHostKeyB64 = null
+      return
+    }
+    try {
+      pushHostKeyB64 = publicKeyToB64((await loadOrCreateKeyPair()).publicKey)
+    } catch {
+      // Keyring locked / transient read error: keep the last-known key (never clobber identity).
     }
   }
   void refreshPushIdentity()
@@ -1479,6 +1722,9 @@ app.whenReady().then(async () => {
     sendToMain(IPC.agentStatus, enriched)
     // Feed the macOS Notch HUD its prompt (ev.task on newTurn) + subagent grouping (no-op off/non-darwin).
     notchHudOnAgentEvent(enriched)
+    // Agent messaging taps the SAME stream: the sender's newTurn resets its fan-out budget, and
+    // an open delivery receipt watch is satisfied by the target's verified advance.
+    onMessagingAgentEvent(enriched)
   }
   hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
@@ -1697,7 +1943,12 @@ app.whenReady().then(async () => {
     return isSafeRemoteTranscriptPath(abs, remoteHome) ? abs : undefined
   }
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
-  hookServer.setRawListener((agentId, nodeId, payload) => {
+  // `meta` carries the per-node `verified` flag and is deliberately UNUSED here: A13 moved
+  // enforcement into the hook server, which refuses before a listener is ever called. This shell
+  // used to keep a `nodeVerified` map written on every event and read by nothing. The parameter
+  // stays because the flag is part of the listener contract and both shells must take it
+  // (invariant 4, pinned by hook-verified-parity.test.ts); a second copy of the answer is not.
+  hookServer.setRawListener((agentId, nodeId, payload, _meta) => {
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.
@@ -2015,8 +2266,12 @@ app.whenReady().then(async () => {
   // the canvas adopts the node live).
   const hostBridge = {
     git: gitService,
-    registerNode: (projectId: string, node: { id: string; title?: string; agentId?: string }) =>
-      workspaceStore.appendRemoteNode(projectId, node),
+    // `accountId` = the managed Claude account the phone launched the session under. It has to be
+    // declared here too, or the wire's honest shape stops at this boundary (see RemoteNodeInput).
+    registerNode: (
+      projectId: string,
+      node: { id: string; title?: string; agentId?: string; accountId?: string }
+    ) => workspaceStore.appendRemoteNode(projectId, node),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
@@ -2178,18 +2433,73 @@ app.whenReady().then(async () => {
   // the live canvas without a reconnect. Read-only unless a mirror write is owed
   // (pushIfStanding:false), one `cat` per project per tick over the ControlMaster. The in-flight
   // set keeps a hung read from stacking a second poll on the same project.
+  //
+  // A project only HAS a master because the renderer's active-project effect connected it, which
+  // left every background / never-opened SSH tab permanently unpolled: a session the phone
+  // registered into one of them showed up only when the user happened to click that tab. So each
+  // tick also sweeps the unconnected ones — REUSE-ONLY (see remote-workspace-poll.ts): a master
+  // that is already running is adopted, a host with no live socket is never dialed.
   {
     const REMOTE_WORKSPACE_POLL_MS = 15_000
+    /** How long a cached ssh endpoint map may be reused before it is re-read from the index. */
+    const SSH_ENDPOINT_TTL_MS = 5 * 60_000
     const inFlight = new Set<string>()
+    let endpoints = new Map<string, { conn: SshConnection; remoteCwd: string }>()
+    let endpointsAt = 0
+    /** The project's connection spec, from the workspace index. Loaded lazily and only when an
+     *  adoption candidate exists, so a workspace with no orphan sockets never pays for it. */
+    const endpointFor = async (
+      projectId: string
+    ): Promise<{ conn: SshConnection; remoteCwd: string } | undefined> => {
+      if (Date.now() - endpointsAt > SSH_ENDPOINT_TTL_MS) {
+        try {
+          // sideline:false — a read-only caller must never rename a mid-merge project.json.
+          const workspace = await workspaceStore.load({ sideline: false })
+          endpoints = new Map(
+            workspace.projects
+              .filter((p) => p.ssh)
+              .map((p) => [p.id, { conn: p.ssh!.server, remoteCwd: p.ssh!.remoteCwd }] as const)
+          )
+          endpointsAt = Date.now()
+        } catch { /* keep the previous map: a failed read is not evidence the endpoints changed */ }
+      }
+      return endpoints.get(projectId)
+    }
     setInterval(() => {
-      for (const projectId of workspaceStore.sshProjectIds()) {
-        if (inFlight.has(projectId) || !sshProjectManager?.refForProject(projectId)) continue
+      const mgr = sshProjectManager
+      if (!mgr) return
+      const plan = planRemoteWorkspacePoll({
+        sshProjectIds: workspaceStore.sshProjectIds(),
+        hasLiveRef: (projectId) => !!mgr.refForProject(projectId),
+        busy: (projectId) => inFlight.has(projectId),
+        // Reuse-only gate: no socket file ⇒ no master to adopt ⇒ this project is left alone.
+        hasControlSocket: (projectId) => existsSync(controlPathFor(projectId))
+      })
+      for (const projectId of plan.poll) {
         inFlight.add(projectId)
         void workspaceStore
           .refreshSshProject(projectId, { pushIfStanding: false })
           .then((adopted) => {
             if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
           })
+          .catch(() => { /* fail-open: the next tick retries */ })
+          .finally(() => inFlight.delete(projectId))
+      }
+      for (const projectId of plan.adopt) {
+        inFlight.add(projectId)
+        void (async () => {
+          const endpoint = await endpointFor(projectId)
+          if (!endpoint) return
+          // Ask the socket itself before touching connect(): a leftover file whose master is gone
+          // would otherwise send connect() down the DIAL path — the one thing this sweep must not
+          // do. `-O check` speaks to the local mux socket only; with no master it fails at once
+          // without opening a connection.
+          const { code } = await mgr.sshRun(checkMasterArgs(endpoint.conn, controlPathFor(projectId)))
+          if (code !== 0) return
+          // Live master → connect() takes its reuse branch (no new auth, no passphrase prompt) and
+          // registers the ref, so the NEXT tick simply polls this project like any other.
+          await mgr.connect(projectId, endpoint.conn, endpoint.remoteCwd)
+        })()
           .catch(() => { /* fail-open: the next tick retries */ })
           .finally(() => inFlight.delete(projectId))
       }

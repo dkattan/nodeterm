@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
+import { useProjects } from '../../../state/projects'
+import {
+  PROJECT_CAPABILITIES,
+  PROJECT_CAPABILITY_COPY,
+  projectCapabilityFlagInFile
+} from '@shared/project-capabilities'
 import {
   isAgentEnabled,
   setAgentEnabled,
@@ -23,6 +29,7 @@ import {
 } from '@shared/agents/approval-mode'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { hintLabel } from '@shared/platform-utils'
+import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import { Select } from '@renderer/ui/Select'
@@ -61,6 +68,22 @@ const ROWS = {
     title: 'One-click approvals',
     keywords: ['approve', 'deny', 'approval', 'permission', 'hook', 'phone', 'canvas', 'one click', 'claude']
   },
+  nodeIdentity: {
+    title: 'Verified node identity',
+    keywords: [
+      'identity',
+      'verify',
+      'verified',
+      'node',
+      'token',
+      'canvas control',
+      'context link',
+      'security',
+      'hook',
+      'strict',
+      'refused'
+    ]
+  },
   hibernation: {
     title: 'Hibernate idle agents',
     keywords: [
@@ -77,7 +100,26 @@ const ROWS = {
     ]
   }
 }
-const ENTRIES = Object.values(ROWS)
+/**
+ * The per-project capability rows are GENERATED from PROJECT_CAPABILITIES — search registry
+ * included. A hand-written row list that happens to match the union is the documented
+ * claims-ahead-of-mechanism failure: agent messaging's row (its PR 6) must appear by adding a copy
+ * entry, and agents-capabilities.test.tsx iterates the array so a capability without a row is red.
+ */
+const CAPABILITY_ROWS = PROJECT_CAPABILITIES.map((cap) => ({
+  cap,
+  title: PROJECT_CAPABILITY_COPY[cap].label,
+  keywords: [
+    'project',
+    'capability',
+    'permission',
+    ...PROJECT_CAPABILITY_COPY[cap].label.toLowerCase().split(/\s+/)
+  ]
+}))
+const ENTRIES = [
+  ...Object.values(ROWS),
+  ...CAPABILITY_ROWS.map(({ title, keywords }) => ({ title, keywords }))
+]
 
 /**
  * Every fact in this sentence is DERIVED from the per-agent mapping (`@shared/agents/approval-mode`):
@@ -102,9 +144,43 @@ function permissionModeDescription(): string {
 // capable list cannot change while the app runs.
 const otherModeAgents = permissionModeAgentIds({ exclude: ['claude'] })
 
+/**
+ * `settings.hookIdentityStrict` is the only OPTIONAL key in `Settings`, because it is a TRI-state
+ * and `undefined` ("follow the dated rollout") is a different answer from `false` ("never enforce").
+ * A `Switch` cannot express that — it would silently collapse the default into one of the two
+ * explicit choices the first time anybody touched it — so this row is a `Select` over three values
+ * that map back onto `boolean | undefined`.
+ *
+ * The date is imported, never typed here: a Settings page promising a different cutoff from the one
+ * the hook server enforces is the worst possible version of this feature.
+ */
+const IDENTITY_CHOICES = ['auto', 'on', 'off'] as const
+type IdentityChoice = (typeof IDENTITY_CHOICES)[number]
+
+const IDENTITY_LABELS: Record<IdentityChoice, string> = {
+  auto: `Automatic (required from ${NODE_IDENTITY_STRICT_DATE})`,
+  on: 'Always required',
+  off: 'Not required'
+}
+
+function identityChoice(value: boolean | undefined): IdentityChoice {
+  return value === undefined ? 'auto' : value ? 'on' : 'off'
+}
+
+function identityValue(choice: IdentityChoice): boolean | undefined {
+  return choice === 'auto' ? undefined : choice === 'on'
+}
+
 export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
+  // Per-project capability rows act on the ACTIVE project. Subscribed (not getState()) so an
+  // off-toggle re-renders immediately — and consumers read the switch per call from the store,
+  // never from a snapshot taken when a lease started (agents-capabilities.test.tsx "takes effect
+  // LIVE"; browser PR 4 / messaging PR 6 rely on that shape).
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
+  const setProjectCapability = useProjects((s) => s.setProjectCapability)
   const rows: { id: AgentId; label: string; isBuiltin: boolean }[] = [
     ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
     ...settings.customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
@@ -158,15 +234,13 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               <div key={row.id} className="flex items-center gap-3 py-1.5">
                 <AgentIcon agentId={row.id} size={18} />
                 <span className="flex-1 text-[13px] text-text">{row.label}</span>
-                {row.isBuiltin && (
-                  <Button
-                    variant={isDefault ? 'primary' : 'default'}
-                    aria-pressed={isDefault}
-                    onClick={() => update(setDefaultAgent(settings, row.id))}
-                  >
-                    {isDefault ? 'Default' : 'Set default'}
-                  </Button>
-                )}
+                <Button
+                  variant={isDefault ? 'primary' : 'default'}
+                  aria-pressed={isDefault}
+                  onClick={() => update(setDefaultAgent(settings, row.id))}
+                >
+                  {isDefault ? 'Default' : 'Set default'}
+                </Button>
                 <SegmentedPill<'enabled' | 'disabled'>
                   value={enabled ? 'enabled' : 'disabled'}
                   ariaLabel={`${row.label} availability`}
@@ -218,6 +292,59 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           }
         />
       </SearchableRow>
+      <SearchableRow {...ROWS.nodeIdentity}>
+        <FieldRow
+          label="Require verified node identity for canvas control"
+          description={`Commands that open, write to or close nodes — and that read a linked node's context — must present the identity NodeTerm issued to the node they say they came from. Automatic starts refusing the ones that can't from ${NODE_IDENTITY_STRICT_DATE}; until then they still run and the reply tells you to restart that node. Set this to "Not required" if an upgrade left a running session unable to drive the canvas: it restores the behaviour from before this feature, past ${NODE_IDENTITY_STRICT_DATE} as well. An identity that is actually forged is refused whatever you pick here.`}
+          control={
+            <Select
+              aria-label="Require verified node identity"
+              value={identityChoice(settings.hookIdentityStrict)}
+              onChange={(e) =>
+                update({ hookIdentityStrict: identityValue(e.target.value as IdentityChoice) })
+              }
+            >
+              {IDENTITY_CHOICES.map((c) => (
+                <option key={c} value={c}>
+                  {IDENTITY_LABELS[c]}
+                </option>
+              ))}
+            </Select>
+          }
+        />
+      </SearchableRow>
+      {CAPABILITY_ROWS.map(({ cap, title, keywords }) => (
+        <SearchableRow key={cap} title={title} keywords={keywords}>
+          <FieldRow
+            label={title}
+            note={
+              activeProject
+                ? `Applies to the active project: ${activeProject.name}.`
+                : 'Open a project to change this — the switch belongs to a project, not to the app.'
+            }
+            // The description carries the capability's own copy AND its cloneWarning — the same
+            // "this is in the project file" sentence the clone notice shows, so the two git-shared
+            // grants read alike wherever they appear (pinned by agents-capabilities.test.tsx).
+            description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
+            control={
+              <Switch
+                // The raw FILE FLAG is the right thing for a settings switch to display — it
+                // mirrors what is written in .nodeterm/project.json. It is NEVER the grant check:
+                // grants require the machine-local 'kept' too (projectCapabilityGrantedFor).
+                checked={projectCapabilityFlagInFile(activeProject, cap)}
+                ariaLabel={title}
+                disabled={!activeProject}
+                onChange={(on) => {
+                  // The ONE strict setter: literal `true` on, field deleted on off. Writing the
+                  // value any other way (a string, a stored false) is the bug the validators
+                  // exist to refuse.
+                  if (activeProject) setProjectCapability(activeProject.id, cap, on)
+                }}
+              />
+            }
+          />
+        </SearchableRow>
+      ))}
       <SearchableRow {...ROWS.hibernation}>
         <FieldRow
           label="Hibernate idle agents"

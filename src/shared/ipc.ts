@@ -39,14 +39,37 @@ export const IPC = {
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
   claudeCliCaps: 'claude-cli:caps',
+  /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
+  codexIdentityCaps: 'codex-identity:caps',
+  /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The
+   *  'plain' events are what make the launcher's fallback visible instead of silent. */
+  codexIdentity: 'codex-identity:event',
+  /** Renderer → main: a snapshot of the main process's `process.env`, used to expand `${env:VAR}`
+   *  tokens in the custom-agent settings preview (the renderer has no `process.env` of its own).
+   *  Values are strings; undefined entries are omitted. */
+  envSnapshot: 'env:snapshot',
+  /** Renderer → main: assemble + `${env:…}`-expand a custom agent's launch command against the
+   *  main process env, returning the exact string nodeterm will type into the shell. Powers the
+   *  live preview in Settings → Custom agents. Payload: `LaunchInputs`; resolves
+   *  `{ command, missingEnv }`. */
+  agentPreviewCommand: 'agent:preview-command',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
+  /** main → renderer: ⌘/Ctrl+0 ("actual size"). Intercepted in `before-input-event` because
+   *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
+   *  page zoom rather than the canvas's. */
+  appZoomActualSize: 'app:zoom-actual-size',
   appCloseWindow: 'app:close-window',
+  /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
+   *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
+  appOpenSettings: 'app:open-settings',
   appFocusWindow: 'app:focus-window',
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
    *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
   clipboardWrite: 'clipboard:write',
+  /** Copy local files as file references (not bytes/text) to the macOS system clipboard. */
+  clipboardWriteFiles: 'clipboard:write-files',
   appNotify: 'app:notify',
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',
@@ -77,12 +100,18 @@ export const IPC = {
   /** hud → main: a HUD row was clicked — focus the node in nodeterm + clear its done latch.
    *  Arg: `nodeId: string`. Reuses the notification-click focus path. */
   hudFocusNode: 'hud:focus-node',
-  /** hud → main: the panel expanded/collapsed. `true` clears every done latch (you looked). */
+  /** hud → main: the panel expanded/collapsed. Arg: `expanded: boolean`. Marks NOTHING as read —
+   *  the handler is deliberately a no-op (notch-hud.ts `onExpanded`). It used to clear every done
+   *  latch ("you looked"), which with three finished sessions waiting meant opening the panel and
+   *  clicking one silently swallowed the other two. Read is strictly per row: `hudFocusNode` clears
+   *  that row, `hudDismiss` hides one by hand. Still wired because the expand state may drive more
+   *  main-side behavior later. */
   hudExpanded: 'hud:expanded',
   /** hud → main: dismiss one HUD row by hand (a stuck session). Arg: `nodeId: string`. */
   hudDismiss: 'hud:dismiss',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
+  agentMessageDeliver: 'agent:message-deliver',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
    *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
    *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see
@@ -216,6 +245,8 @@ export const IPC = {
   filesDownloadTicket: 'files:download-ticket',
   /** Persist pasted/dropped bytes that have no path here, and answer their absolute path. */
   filesSaveUpload: 'files:save-upload',
+  /** Write a canvas image into the project's own `.nodeterm/images/` (see core/canvas-images.ts). */
+  filesSaveCanvasImage: 'files:save-canvas-image',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',
@@ -238,6 +269,7 @@ export const IPC = {
   sshFsWrite: 'sshFs:write',
   sshFsMkdir: 'sshFs:mkdir',
   sshFsExists: 'sshFs:exists',
+  sshFsQuickOpen: 'sshFs:quick-open',
   sshProjectStatus: 'ssh-project:status',
   /** main → renderer: an SSH project's identity file is passphrase-protected and the ssh-agent
    *  does not hold the key (or the last answer was wrong), so show a prompt.

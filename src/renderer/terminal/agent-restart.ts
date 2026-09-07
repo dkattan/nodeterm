@@ -4,7 +4,7 @@
  * model list without losing the conversation. Kept free of DOM/IPC so the node menu, the bulk
  * filter and the restart choreography can all share exactly one set of rules.
  */
-import { canResume, resumeCommand } from '../../shared/agents/config'
+import { canResume, canResumeWith, capabilityAgentId, resumeCommand } from '../../shared/agents/config'
 import { isShellCommand } from '@shared/agents/pane'
 import {
   DELIVERY_ATTEMPTS,
@@ -36,7 +36,10 @@ const EXIT_SEQUENCES: Record<string, string> = {
 }
 
 export function exitSequence(agentId: string): string | null {
-  return EXIT_SEQUENCES[agentId] ?? null
+  // Resolve through the BASE harness so a custom agent that inherits claude (e.g. a proxy wrapper)
+  // exits with claude's `/exit` — its own CLI grammar is claude's. A baseless custom agent has no
+  // exit sequence (no safe way to ask an unknown CLI to quit) and returns null, as before.
+  return EXIT_SEQUENCES[capabilityAgentId(agentId)] ?? null
 }
 
 /** Re-exported, not redefined: it lives in `@shared/agents/pane` so the main process can ask the
@@ -154,10 +157,12 @@ export async function performExitPhase(d: {
   isLive?: () => boolean
 }): Promise<ExitPhaseOutcome> {
   const exit = exitSequence(d.agentId)
-  const base = resumeCommand(d.agentId, d.sessionId)
-  // The BARE command is the gate: `resumeCommand` is what validates the session id before it
-  // reaches a command line, and a session we could not resume must not be quit.
-  if (!exit || !base) return 'not-eligible'
+  // The eligibility GATE (not the command): `canResumeWith` validates the session id the way
+  // `resumeCommand` does, without building the command — which for a custom agent needs its
+  // `launchCmd` from settings (unavailable in this pure module). The typed resume line is the
+  // caller's job (`performResumePhase` takes it as `d.command`); the exit half only needs to know
+  // the session is one we WOULD resume into, so it does not quit a conversation it cannot bring back.
+  if (!exit || !canResumeWith(d.agentId, d.sessionId)) return 'not-eligible'
   const timeoutMs = d.timeoutMs ?? RESTART_EXIT_TIMEOUT_MS
   const pollMs = d.pollMs ?? RESTART_POLL_MS
   // A dead session is not a restart that failed — there is no pane left to fail in. `'not-eligible'`
@@ -249,11 +254,15 @@ export async function performResumePhase(d: {
    */
   isLive?: () => boolean
 }): Promise<ResumePhaseOutcome> {
+  // The eligibility GATE (see performExitPhase): `canResumeWith` validates the session id without
+  // building the command. The typed line is the caller's `d.command`; for a builtin with no
+  // override, `resumeCommand` supplies the bare resume command. A custom agent MUST pass
+  // `d.command` (its baseAgent-aware line, built by `assembleResumeCommand` in the node) — it has
+  // no `resumeCommand` here, so a missing `command` for a custom agent refuses before any write.
+  if (!canResumeWith(d.agentId, d.sessionId)) return 'not-eligible'
   const base = resumeCommand(d.agentId, d.sessionId)
-  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
-  // validates the session id before it reaches a command line.
-  if (!base) return 'not-eligible'
   const cmd = d.command ?? base
+  if (!cmd) return 'not-eligible'
   const gone = (): boolean => !!d.isLive && !d.isLive()
   // Awaited, not fire-and-forget: see the header. `deliverCommand` is started inside the executor
   // (synchronously, so `onDelivery` still hands the cancel out before any await) and announces the
@@ -462,6 +471,14 @@ export interface BulkRestartCandidate {
    *  is unconditional for every terminal node, so this answers only "can I reach this pane", never
    *  "is this an agent" — `agentId` above is the one that decides that. */
   wired: boolean
+  /** Is a background shell task running inside this node's CLI (Claude's `Bash` with
+   *  `run_in_background`)? It dies with the CLI the exit line quits — silently, with no output and
+   *  no error — and the eligibility gate cannot see it: the node reports `done` the whole time.
+   *
+   *  Required, not optional: typecheck is what forces every call site to answer the question (the
+   *  `remote` / `liveBackgroundTask` precedent), and an omitted field would read as "no task" —
+   *  the one wrong direction. Fed from `agentStatus.backgroundTaskAt`. */
+  backgroundTask: boolean
 }
 
 export interface BulkRestartPlan {
@@ -489,6 +506,17 @@ export function planBulkRestart(candidates: BulkRestartCandidate[]): BulkRestart
       if (gate.reason === 'working') plan.skipped.working++
       else if (gate.reason === 'no-session') plan.skipped.noSession++
       // 'not-resumable' — never a target, see above.
+      continue
+    }
+    // AFTER the eligibility gate, so a node that was never a target stays uncounted whatever else
+    // is true of it — and BEFORE the wired check, because a live background task is the sharper
+    // fact: "no session" would send the user looking for a pane that is fine.
+    //
+    // Counted as `working`, not as a fifth part: the summary line is spec-frozen at four, and
+    // `'working'`'s documented meaning — "busy, try again in a moment" — is exactly what a running
+    // background task is.
+    if (c.backgroundTask) {
+      plan.skipped.working++
       continue
     }
     if (!c.wired) {

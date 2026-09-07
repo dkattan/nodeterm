@@ -47,12 +47,85 @@
 // NEEDS YOU badge flips to working immediately rather than lingering until the agent's next hook. The
 // whole branch is a NO-OP when the env var is absent (a user's own terminals, older
 // nodeterm, non-claude agents), so behavior is bit-for-bit legacy there.
-export function buildManagedScript(agentId: string): string {
+/**
+ * `identityRoot` is where the Codex thread → node records live (`codexThreadIdentityRoot()`).
+ * It is a PARAMETER because this builder is also called from tests that never boot a platform,
+ * and because the prelude has to bake the path in — the shell it runs in has no idea where the
+ * app's data dir is. Undefined (no platform yet) ⇒ no prelude, i.e. today's script exactly.
+ *
+ * The prelude is prepended for EVERY agent, not just codex. It is inert without `CODEX_THREAD_ID`,
+ * which no other agent's tool shell sets, and one builder beats a codex-only fork of it.
+ */
+import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
+import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
+import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
+
+/**
+ * Bumped by hand whenever this script's CONTRACT with the server changes. Not a git sha and not a
+ * date: the server COMPARES it (`>= MIN_TOKEN_AWARE_REVISION`), and a sha does not order.
+ *
+ * WHY THIS EXISTS AT ALL. Before it, an old script and a current script whose token file happened to
+ * be missing were byte-identical on the wire: both POST `version=2` (that field is sourced from the
+ * ENDPOINT FILE, so it reports the server's protocol version, never the client's) and neither sends
+ * an X-Nodeterm-Node-Token header. The server therefore could not distinguish "this session cannot
+ * read a token" from "there is no token to read" — and those need OPPOSITE advice. Messaging's gate
+ * 2 would have told an SSH-only host's session to retry after its next turn, forever.
+ *
+ * Two stale windows this makes visible, and they are ONE mechanism:
+ *   - LOCAL: none in practice. install-helper.ts rewrites the script unconditionally at every boot
+ *     of both shells, so a host running nodeterm is current as of its last start.
+ *   - REMOTE: real. remote-hooks.ts writes it only inside RemoteHooks.setup(), which runs on
+ *     CONNECT. An already-connected project keeps the script it was given, so its remote nodes —
+ *     and any session the PHONE spawns on that host, which runs the host's installed script — stay
+ *     `legacy` until the project reconnects.
+ */
+export const MANAGED_SCRIPT_REVISION = 3
+/** The first revision that reads NODETERM_NODE_TOKEN_DIR and sends the node token (PR #195). */
+export const MIN_TOKEN_AWARE_REVISION = 3
+
+function safeIdentityRoot(): string | null {
+  try {
+    return codexThreadIdentityRoot()
+  } catch {
+    return null
+  }
+}
+
+export function buildManagedScript(
+  agentId: string,
+  identityRoot: string | null = safeIdentityRoot()
+): string {
   return [
     '#!/bin/sh',
+    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),
     'if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then',
     '  . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :',
     'fi',
+    '# THIS SCRIPT\'s revision, stamped on every POST (X-Nodeterm-Hook-Client) so the server can tell',
+    '# a session running a pre-identity script from one whose token file is merely missing — they',
+    '# used to be byte-identical on the wire, because the `version` field below comes from the',
+    '# ENDPOINT FILE and therefore reports the SERVER\'s protocol version, never the client\'s.',
+    '# Deliberately set HERE, outside nt_pick_fallback\'s clearing block: sock/port/token-dir belong',
+    '# to whichever endpoint we adopt, but the revision is a property of this file on this disk.',
+    '# (The failover SOURCES the endpoint file it adopts, so a file carrying an nt_client_rev line',
+    '# would overwrite this. Not defended against and not worth defending: every candidate is a',
+    '# 0600 file under our own $HOME, so writing one already means being us — at which point the',
+    '# script itself is editable. Noted so the next reader does not have to re-derive it.)',
+    `nt_client_rev=${MANAGED_SCRIPT_REVISION}`,
+    '# The PER-NODE capability. The endpoint file (v2) advertises the directory; the token itself is',
+    '# one file in it named for THIS node id — a lookup by name, never a scan, so a session can only',
+    '# ever present its own. Absent (pre-v2 endpoint, pre-upgrade session, remote write that failed)',
+    '# leaves it EMPTY, and an empty header is exactly what the server reads as `legacy`: the POST',
+    '# still happens and nothing about it fails. Kept in a function because the failover below has to',
+    '# RE-read it against the dir of the endpoint it adopted.',
+    'nt_read_node_token() {',
+    '  nt_node_token=""',
+    '  if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then',
+    '    nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null)',
+    '  fi',
+    '}',
+    'nt_read_node_token',
+    HOOK_CURL_HEADERS_SH,
     '# Gate on the NODE ID only — it is what marks a nodeterm-spawned session (a user\'s own',
     '# terminal has neither var and exits here, bit-for-bit legacy no-op). The token is NOT',
     '# required at this point: a phone-spawned session whose endpoint was empty/dead at spawn',
@@ -87,9 +160,14 @@ export function buildManagedScript(agentId: string): string {
     'fi',
     '# --- Endpoint failover helpers --------------------------------------------------',
     '# Source the freshest EXISTING candidate endpoint file, skipping the already-tried path',
-    '# ($1), into NODETERM_HOOK_{SOCK,PORT,TOKEN,VERSION}. Returns 0 if one was sourced, else 1.',
+    '# ($1), into NODETERM_HOOK_{SOCK,PORT,TOKEN,VERSION} + NODETERM_NODE_TOKEN_DIR. Returns 0 if one',
+    '# was sourced, else 1.',
     '# SOCK/PORT are cleared first so a primary-vs-fallback transport switch (e.g. dead SOCK →',
-    '# live PORT) never leaves the stale transport winning in the re-POST below.',
+    '# live PORT) never leaves the stale transport winning in the re-POST below. NODE_TOKEN_DIR is',
+    '# cleared for the same reason and one more: our token belongs to the instance that MINTED it, so',
+    '# carrying our dir into someone else\'s endpoint would point the read at a directory that server',
+    '# cannot verify. Cleared, the newly sourced file sets its own — we then present THAT instance\'s',
+    '# token for this node, or (if it has none) nothing at all, which is honest `legacy`.',
     'nt_pick_fallback() {',
     '  nt_tried="$1"',
     '  set --',
@@ -109,6 +187,7 @@ export function buildManagedScript(agentId: string): string {
     '  [ -n "$nt_fresh" ] && [ -r "$nt_fresh" ] || return 1',
     '  NODETERM_HOOK_SOCK=""',
     '  NODETERM_HOOK_PORT=""',
+    '  NODETERM_NODE_TOKEN_DIR=""',
     '  . "$nt_fresh" 2>/dev/null || return 1',
     '  return 0',
     '}',
@@ -117,19 +196,21 @@ export function buildManagedScript(agentId: string): string {
     '# endpoint) so that case also tries a fallback.',
     'nt_request_post() {',
     '  if [ -n "$NODETERM_HOOK_SOCK" ]; then',
+    // The pipeline\'s exit status IS curl\'s (POSIX: the status of a pipeline is its last command),
+    // which is what nt_send_request below reads to decide whether to fail over.
+    '    nt_hook_headers |',
     `    curl -sS -X POST --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/hook/${agentId}" \\`,
-    '      --connect-timeout 0.5 --max-time 1.5 \\',
+    '      --connect-timeout 0.5 --max-time 1.5 --config - \\',
     '      -H "Content-Type: application/x-www-form-urlencoded" \\',
-    '      -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '      --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '      --data-urlencode "payload=${payload}" >/dev/null 2>&1',
     '  elif [ -n "$NODETERM_HOOK_PORT" ]; then',
+    '    nt_hook_headers |',
     `    curl -sS -X POST "http://127.0.0.1:\${NODETERM_HOOK_PORT}/hook/${agentId}" \\`,
-    '      --connect-timeout 0.5 --max-time 1.5 \\',
+    '      --connect-timeout 0.5 --max-time 1.5 --config - \\',
     '      -H "Content-Type: application/x-www-form-urlencoded" \\',
-    '      -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '      --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
@@ -146,6 +227,10 @@ export function buildManagedScript(agentId: string): string {
     'nt_send_request() {',
     '  nt_request_post && return 0',
     '  if nt_pick_fallback "$NODETERM_HOOK_ENDPOINT"; then',
+    '    # The token is re-read HERE, not once at the top: it must come from the dir the endpoint we',
+    '    # just adopted advertises. Reusing the primary\'s would send our kid to a server that cannot',
+    '    # judge it — harmless, but also pointless, and it would hide a real identity behind a legacy.',
+    '    nt_read_node_token',
     '    nt_request_post',
     '  fi',
     '}',
@@ -175,20 +260,20 @@ export function buildManagedScript(agentId: string): string {
     '      # nodeterm_answered=<decision>; only for a valid allow/deny (no POST on a bad/timed-out answer).',
     '      if [ "$nt_decision" = "allow" ] || [ "$nt_decision" = "deny" ]; then',
     '        if [ -n "$NODETERM_HOOK_SOCK" ]; then',
+    '          nt_hook_headers |',
     `          curl -sS -X POST --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/hook/${agentId}" \\`,
-    '            --connect-timeout 0.5 --max-time 1 \\',
+    '            --connect-timeout 0.5 --max-time 1 --config - \\',
     '            -H "Content-Type: application/x-www-form-urlencoded" \\',
-    '            -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '            --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '            --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '            --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '            --data-urlencode "nodeterm_answered=${nt_decision}" \\',
     '            --data-urlencode "payload=${payload}" >/dev/null 2>&1 &',
     '        elif [ -n "$NODETERM_HOOK_PORT" ]; then',
+    '          nt_hook_headers |',
     `          curl -sS -X POST "http://127.0.0.1:\${NODETERM_HOOK_PORT}/hook/${agentId}" \\`,
-    '            --connect-timeout 0.5 --max-time 1 \\',
+    '            --connect-timeout 0.5 --max-time 1 --config - \\',
     '            -H "Content-Type: application/x-www-form-urlencoded" \\',
-    '            -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '            --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '            --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '            --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',

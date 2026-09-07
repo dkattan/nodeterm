@@ -7,7 +7,7 @@ export type AgentState = 'working' | 'waiting' | 'blocked' | 'done'
 export interface NormalizedAgentEvent {
   nodeId: string
   agentId: AgentId
-  kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session'
+  kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session' | 'background-task'
   state?: AgentState
   // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
   // skips the completion alert/unread for these (the user was right there).
@@ -53,6 +53,27 @@ export interface NormalizedAgentEvent {
   tokens?: number
   toolUses?: number
   result?: string
+  /**
+   * The POST that produced this event presented a per-node token the running instance had minted
+   * for THIS node id. Set by the hook server, never by a normalizer.
+   *
+   * It is a LABEL, not a permission: `false` covers every client that predates the token, the
+   * phone, and the documented cross-instance failover, so no consumer may treat it as "reject".
+   */
+  verified?: boolean
+  /**
+   * The revision of the managed hook script that posted this event (`MANAGED_SCRIPT_REVISION`,
+   * sent as `X-Nodeterm-Hook-Client`). Set by the hook server, never by a normalizer.
+   *
+   * `undefined` means the client sent no stamp — a script that predates the header, i.e. one that
+   * also predates per-node identity. That is a DISTINCT state from `verified: false`, and telling
+   * them apart is the entire point: a session with no token file needs "retry after its next turn",
+   * a session running an old script needs "reconnect the project / restart the app", and before
+   * this field the two were indistinguishable on the wire.
+   *
+   * Like `verified` it is a LABEL: nothing may refuse a POST because of it.
+   */
+  clientRevision?: number
   // recurring
   recurringKind?: 'loop' | 'schedule' | 'cron'
   /** The recurring job was REMOVED (e.g. CronDelete) — take the card down. */
@@ -95,6 +116,8 @@ interface ClaudePayload {
     prompt?: string
     skill?: string
     cron?: string
+    /** Bash only: the task was launched as a background shell (`run_in_background: true`). */
+    run_in_background?: boolean
   }
   tool_response?: {
     status?: string
@@ -184,6 +207,14 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
           task: p.tool_input?.prompt
         }
       }
+    }
+    // A background shell task lives INSIDE the CLI process: /exit kills it silently. This event
+    // is the stamp Eco hibernation and the bulk restart exclude on (see hibernation-policy /
+    // planBulkRestart). PreToolUse only, and `=== true` — an absent or false flag is a foreground
+    // command, which the generic "working" below already covers. Claude-only: no other dialect
+    // carries the field (closed set, CLAUDE.md agent rule 7).
+    if (ev === 'PreToolUse' && tool === 'Bash' && p.tool_input?.run_in_background === true) {
+      return { ...base, kind: 'background-task' }
     }
     // Any other tool use is just "working".
     return { ...base, kind: 'state', state: 'working' }

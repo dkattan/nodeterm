@@ -16,6 +16,7 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
   type NotifyPayload,
@@ -152,7 +153,8 @@ export function buildStubApi(): Omit<
       readBinary: U('sshFs.readBinary'),
       write: U('sshFs.write'),
       mkdir: U('sshFs.mkdir'),
-      exists: U('sshFs.exists')
+      exists: U('sshFs.exists'),
+      quickOpen: U('sshFs.quickOpen')
     },
     clipboard: {
       // Clipboard API → execCommand → visible error. `navigator.clipboard` only exists in a SECURE
@@ -165,7 +167,9 @@ export function buildStubApi(): Omit<
           return
         }
         copyViaExecCommand(text)
-      }
+      },
+      // A browser cannot place host-local file references on the viewer's OS clipboard.
+      writeFiles: async (): Promise<boolean> => false
     },
     shell: {
       // no filesystem-reveal in a browser; intentionally inert (see docs/SERVER.md)
@@ -255,11 +259,25 @@ export function buildStubApi(): Omit<
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
     },
+    codex: {
+      // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
+      // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
+      // identity, so every Codex launch line stays the bare `codex`.
+      identityCaps: () => Promise.resolve(UNKNOWN_CODEX_IDENTITY_CAPS),
+      onIdentity: noopUnsub
+    },
     claude: {
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
+    },
+    agent: {
+      // The preview/expansion IPC runs main-side (the renderer has no process.env). In the browser
+      // (Server Edition) ws-bridge overrides this with the real handler; the stub returns an empty
+      // env + unexpanded command so the preview degrades to "unavailable" rather than throwing.
+      envSnapshot: () => Promise.resolve({}),
+      previewCommand: U('agent.previewCommand')
     },
     chat: {
       readTranscript: U('chat.readTranscript')
@@ -322,6 +340,10 @@ export function buildStubApi(): Omit<
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
+    // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
+    // renderer's own keydown handler is the whole path there.
+    onZoomActualSize: noopUnsub,
+    onOpenSettings: noopUnsub,
     closeWindow: noop,
     // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow
     // can, but `window.focus()` still helps when the page is merely blurred (not another OS app).
@@ -364,7 +386,16 @@ export function buildStubApi(): Omit<
       error: 'Raising the terminal limit must be done on the machine running the server.'
     }),
     onAgentControl: noopUnsub,
-    sendAgentControlResult: noop
+    sendAgentControlResult: noop,
+    // Messaging never runs in the browser: `onAgentControl` above is inert here, so no dispatch
+    // can ever reach this. It answers the honest terminal refusal all the same, so a stray call
+    // can never look like it delivered.
+    agentMessage: {
+      deliver: async () => ({
+        ok: false as const,
+        error: 'Agent messaging is only available in the desktop app. Do not retry.'
+      })
+    }
   } satisfies Omit<
     NodeTerminalApi,
     | 'pty'
