@@ -21,6 +21,9 @@ export const IPC = {
   /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
    *  agent restart sees that the CLI has exited and a shell owns the pane again. */
   ptyPaneCommand: 'pty:pane-command',
+  /** Renderer → core: SIGTERM the non-shell foreground process group in this node's pane.
+   *  Model switching uses this instead of typing an exit slash-command into an agent composer. */
+  ptyTerminateForeground: 'pty:terminate-foreground',
   ptyReadSessionName: 'pty:read-session-name',
   /** Shell → renderer: this MACHINE's pty-device pressure band changed (core/pty-pressure.ts).
    *  Payload: `PtyPressure` — `{ level, usage, ceiling }`. Sent on band CHANGES only, and re-sent
@@ -53,6 +56,13 @@ export const IPC = {
    *  live preview in Settings → Custom agents. Payload: `LaunchInputs`; resolves
    *  `{ command, missingEnv }`. */
   agentPreviewCommand: 'agent:preview-command',
+  /** Renderer → core: fetch an OpenAI-compatible model catalogue without browser CORS. */
+  agentDiscoverModels: 'agent:discover-models',
+  /** Renderer → core secret boundary for a literal model-gateway API key. The value is write-only;
+   *  status returns only presence + storage protection. */
+  agentGatewayCredentialStatus: 'agent:gateway-credential-status',
+  agentGatewayCredentialSave: 'agent:gateway-credential-save',
+  agentGatewayCredentialClear: 'agent:gateway-credential-clear',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
@@ -65,6 +75,12 @@ export const IPC = {
    *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
   appOpenSettings: 'app:open-settings',
   appFocusWindow: 'app:focus-window',
+  /** Native View menu → renderer: toggle the Snap-to-Grid arrange mode. */
+  appToggleAutoAlign: 'app:toggle-auto-align',
+  /** Native View menu → renderer: fit the canvas to its nodes. */
+  appFitView: 'app:fit-view',
+  /** Native View menu → renderer: toggle the kanban / canvas view. */
+  appToggleKanban: 'app:toggle-kanban',
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
    *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
   clipboardWrite: 'clipboard:write',

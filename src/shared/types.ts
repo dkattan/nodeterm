@@ -8,6 +8,11 @@ import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type {
+  ModelDiscoveryResult,
+  ModelGatewayCredentialStatus,
+  ModelGatewaySettings
+} from './agents/model-gateway'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -27,6 +32,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
+  agentModel?: string
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
@@ -224,6 +231,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this agent node through the shared model gateway. */
+  agentModel?: string
   /** Set while this node is armed but not yet launched — see PendingLaunch. */
   pendingLaunch?: PendingLaunch
   /**
@@ -632,6 +641,9 @@ export interface PtyApi {
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
   paneCommand(persistKey: string): Promise<string | null>
+  /** Terminate the foreground non-shell process group in a node's pane. Returns false when the
+   *  pane/process cannot be safely identified; it never kills the pane's login shell. */
+  terminateForeground(persistKey: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from the agent's own
    *  session store, resolved strictly by sessionId; null if unknown. Keeps a node title in sync with
    *  the `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.
@@ -881,7 +893,16 @@ export interface Settings {
   /** Empty string = use the system default shell. */
   defaultShell: string
   gridSize: number
+  /** Drag-time snap: while ON, dragging a node rounds its position to the grid. A live editor in
+   *  BehaviorSection; the canvas reads it for the React Flow `snapToGrid` prop. Distinct from
+   *  `autoAlignGrid` (a one-shot arrange-all), which is a mode, not a drag constraint. */
   snapToGrid: boolean
+  /** Snap-to-grid MODE (like a desktop "Auto arrange"): while ON, every node is snapped to the
+   *  grid at the moment the mode is turned on (the existing one-shot `alignToGrid` run over all
+   *  node ids). Toggled from the native View menu (with a checkmark) and Settings → Behavior.
+   *  Distinct from `snapToGrid` (drag-time snap) — turning this on arranges once; it does not
+   *  constrain future drags. v1: arrange-all-on-enable only. */
+  autoAlignGrid: boolean
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
@@ -894,6 +915,11 @@ export interface Settings {
    *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
    *  tree, so a deleted frame or project cannot grow settings.json forever. */
   sidebarCollapsedItems: Record<string, boolean>
+  /** Sessions sidebar top-level grouping. 'project' (the default, the historical behavior) groups
+   *  sessions under their project; 'status' flattens across projects and regroups by live agent
+   *  status so sessions needing attention float to the top. Remote/relay sessions have no live
+   *  status in the sidebar and show as idle in either mode. */
+  sidebarGrouping: 'project' | 'status'
   /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
    *  Personal machine-local preference; per-project explicit choices override it. */
   defaultProjectView: 'canvas' | 'kanban'
@@ -998,6 +1024,8 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
+  modelGateway: ModelGatewaySettings
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
@@ -1113,10 +1141,12 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
+  autoAlignGrid: false,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
   sidebarCollapsedItems: {},
+  sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
   panHoverDelay: 600,
   doubleClickFocus: true,
@@ -1142,6 +1172,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   customAgents: [],
+  modelGateway: { baseUrl: '', apiKey: '' },
   claudeAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
@@ -2033,10 +2064,17 @@ export interface AgentApi {
     agentId: AgentId
     customAgent?: CustomAgent
     initialPrompt?: string
+    model?: string
     permissionMode?: AgentPermissionMode
     sessionId?: string
     sessionIdFlagSupported?: boolean
   }): Promise<{ command: string; missingEnv: string[] }>
+  /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
+  discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
+  /** Literal gateway credentials are write-only in the renderer. */
+  gatewayCredentialStatus(): Promise<ModelGatewayCredentialStatus>
+  saveGatewayCredential(apiKey: string): Promise<ModelGatewayCredentialStatus>
+  clearGatewayCredential(): Promise<ModelGatewayCredentialStatus>
 }
 
 export interface HandoffApi {
@@ -2311,6 +2349,12 @@ export interface NodeTerminalApi {
    *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
    *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
   onZoomActualSize(listener: () => void): () => void
+  /** Native View menu → Snap to Grid toggle. Returns unsubscribe. */
+  onToggleAutoAlign(listener: () => void): () => void
+  /** Native View menu → Fit View. Returns unsubscribe. */
+  onFitView(listener: () => void): () => void
+  /** Native View menu → Toggle Kanban / Canvas view. Returns unsubscribe. */
+  onToggleKanban(listener: () => void): () => void
   /** Fires when the native app menu's "Settings…" item (⌘,) is clicked. Returns unsubscribe. */
   onOpenSettings(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */

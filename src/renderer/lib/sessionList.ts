@@ -26,6 +26,9 @@ export interface ProjectInput {
 
 export type StatusKind = 'working' | 'attention' | 'done' | 'idle'
 
+/** Sessions sidebar top-level grouping mode. */
+export type SidebarGrouping = 'project' | 'status'
+
 const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
   attention: 'Needs you',
@@ -44,13 +47,22 @@ export function groupCollapseKey(projectId: string, groupId: string): string {
 }
 
 /**
+ * Status section order when the sidebar is grouped by status. Anything needing you floats to the
+ * top; working sinks to the bottom (a turn in flight is the least urgent to revisit). Idle sits
+ * above done so a session whose state was lost — including a waiting one a scraper misclassified
+ * as idle — stays above the finished pile.
+ */
+const STATUS_ORDER: StatusKind[] = ['attention', 'idle', 'done', 'working']
+
+/**
  * Whether a project row is collapsed in the sessions sidebar. `settings.sidebarAutoCollapse`
  * only supplies the DEFAULT for a project the user never toggled: on (the default) keeps the
  * active project expanded and every other one collapsed, off leaves everything expanded. An
  * explicit toggle, recorded in `overrides` under `projectCollapseKey` (true = collapsed), always
  * wins — and since 2026-08 those choices are PERSISTED (`settings.sidebarCollapsedItems`), so a
  * project switch no longer discards them. Group rows are not defaulted at all: an untouched
- * frame is expanded, which is why `renderBucket` reads the map directly.
+ * frame is expanded, which is why `renderBucket` reads the map directly. (Status mode ignores
+ * collapse entirely — its sections are always expanded.)
  */
 export function isGroupCollapsed(
   overrides: Record<string, boolean>,
@@ -177,6 +189,12 @@ export interface SessionRowVM {
   sshHost?: string
   sessionId?: string
   usesContext: boolean
+  /** Populated only when the sidebar is grouped by status (rows are flattened across projects):
+   *  the project the session belongs to, so the row can show a project monogram and route
+   *  project-scoped callbacks. Absent in project mode, where the enclosing group carries it. */
+  projectId?: string
+  projectName?: string
+  projectColor?: string
 }
 
 /** A canvas group frame, the sessions directly inside it, and the frames nested inside it. */
@@ -213,7 +231,11 @@ export interface SessionGroup {
   ungrouped: SessionRowVM[]
 }
 
-function toRow(n: SessionNodeInput, status: AgentNodeStatus | undefined): SessionRowVM {
+function toRow(
+  n: SessionNodeInput,
+  status: AgentNodeStatus | undefined,
+  project?: Pick<ProjectInput, 'id' | 'name' | 'color'>
+): SessionRowVM {
   const statusKind = sessionStatusKind(status?.state)
   return {
     id: n.id,
@@ -234,7 +256,11 @@ function toRow(n: SessionNodeInput, status: AgentNodeStatus | undefined): Sessio
     cwd: n.cwd,
     sshHost: n.ssh?.host,
     sessionId: status?.sessionId,
-    usesContext: n.agentId ? hasUsage(n.agentId) : false
+    usesContext: n.agentId ? hasUsage(n.agentId) : false,
+    // Only populated in status mode (flattened across projects); absent in project mode.
+    projectId: project?.id,
+    projectName: project?.name,
+    projectColor: project?.color
   }
 }
 
@@ -322,4 +348,116 @@ export function buildSessionList(
   // Store order, NOT active-first: the sidebar mirrors the tab bar (both read the projects
   // array), and hoisting the active project to the top made every click reshuffle the list.
   return needle ? groups.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0) : groups
+}
+
+/** A status section in status-grouping mode: one live status kind and the sessions in it,
+ *  flattened across all (local-core) projects. Order is fixed by STATUS_ORDER. */
+export interface StatusSection {
+  kind: StatusKind
+  label: string
+  rows: SessionRowVM[]
+}
+
+/**
+ * Build the status-grouped session list: every project's terminal nodes flattened into one list,
+ * bucketed by live agent status so sessions needing attention float to the top. Project walls and
+ * canvas sub-group frames are dropped — this is a flat regrouping keyed on status, not a
+ * re-sort within project. Within a section, rows keep a stable order (project store-order, then
+ * title) so the list doesn't reshuffle as statuses change.
+ *
+ * Status comes from the same global `statusById` map `buildSessionList` reads; for local-core
+ * projects that map is live for every node regardless of which project is active. Remote/relay
+ * nodes are absent from it, so they fall through to `idle` — the same way they render in project
+ * mode today, so this introduces no regression.
+ */
+export function buildStatusList(
+  projects: ProjectInput[],
+  liveActiveNodes: SessionNodeInput[] | null,
+  activeProjectId: string,
+  statusById: Record<string, AgentNodeStatus>,
+  filter: string
+): StatusSection[] {
+  const needle = filter.trim().toLowerCase()
+  const keep = (r: SessionRowVM): boolean => !needle || matches(r, needle)
+
+  // Flatten every project's terminal nodes into status-tagged rows. Canvas sub-group frames are
+  // ignored here — status mode is flat by design. The project index rides alongside (not on the
+  // VM) so we can sort by project store-order without a scratch field.
+  //
+  // OWNERSHIP & DEDUP: a node belongs to the project whose persisted `p.nodes` contains it. The
+  // active project layers its live React Flow nodes (`liveActiveNodes`) on TOP of its persisted
+  // nodes (live wins for up-to-the-frame title/status), but the persisted set is the source of
+  // truth for which nodes are the active project's. This closes a duplication window during a
+  // cross-project focus: focusNodeById → switchProject flips `activeProjectId` synchronously, but
+  // React Flow's nodes (and thus `liveActiveNodes`) still hold the PREVIOUS project's nodes until
+  // the load effect's setNodes flushes on a later render. In that window a naive "active project =
+  // liveActiveNodes" read would tag the stale nodes with the new project's id AND the previous
+  // project's `p.nodes` (just committed) would emit them again — the same node twice, under two
+  // project tags. Keying off the persisted owner map and unioning live nodes only for the active
+  // project means each node id is emitted at most once, owned by its real project, throughout the
+  // switch. (project mode hides the dupe behind collapse, which is why it only surfaced here.)
+  const ownerById = new Map<string, { p: ProjectInput; pidx: number }>()
+  projects.forEach((p, pidx) => {
+    for (const n of p.nodes) ownerById.set(n.id, { p, pidx })
+  })
+
+  const tagged: { row: SessionRowVM; pidx: number }[] = []
+  const seen = new Set<string>()
+  // Live title/status overrides for the active project's nodes (newer than the persisted snapshot).
+  const liveById = new Map<string, SessionNodeInput>()
+  if (liveActiveNodes) for (const n of liveActiveNodes) liveById.set(n.id, n)
+
+  projects.forEach((p, pidx) => {
+    const isActive = p.id === activeProjectId
+    for (const n of p.nodes) {
+      if (n.kind !== 'terminal') continue
+      // For the active project, prefer the live node (fresh title/agent) when one exists; for the
+      // rest, the persisted node is already current. This mirrors buildSessionList's live-vs-store
+      // choice without ever dropping the persisted set as the ownership key.
+      const node = isActive && liveById.has(n.id) ? liveById.get(n.id)! : n
+      if (seen.has(node.id)) continue
+      seen.add(node.id)
+      const row = toRow(node, statusById[node.id], p)
+      if (keep(row)) tagged.push({ row, pidx })
+    }
+  })
+  // A node in `liveActiveNodes` that isn't in any project's persisted set (brand-new, not yet
+  // committed) would be missed above. Emit it under the active project as a fallback — it's live
+  // on the active canvas, so that's the only project it can belong to.
+  if (liveActiveNodes) {
+    const active = projects.find((p) => p.id === activeProjectId)
+    if (active) {
+      const activePidx = projects.indexOf(active)
+      for (const n of liveActiveNodes) {
+        if (n.kind !== 'terminal' || seen.has(n.id) || ownerById.has(n.id)) continue
+        seen.add(n.id)
+        const row = toRow(n, statusById[n.id], active)
+        if (keep(row)) tagged.push({ row, pidx: activePidx })
+      }
+    }
+  }
+
+  // Bucket by status, then stable-sort each bucket by project store-order then title.
+  const byStatus = new Map<StatusKind, { row: SessionRowVM; pidx: number }[]>()
+  for (const { row, pidx } of tagged) {
+    const list = byStatus.get(row.statusKind)
+    if (list) list.push({ row, pidx })
+    else byStatus.set(row.statusKind, [{ row, pidx }])
+  }
+  for (const list of byStatus.values()) {
+    list.sort((a, b) =>
+      a.pidx !== b.pidx
+        ? a.pidx - b.pidx
+        : a.row.title.toLowerCase().localeCompare(b.row.title.toLowerCase())
+    )
+  }
+
+  // Non-empty sections only, in the fixed order. An empty section has no rows to surface (a
+  // misclassified-as-done session still has a row, so Done is rendered) — see the design's
+  // done/idle-visibility rule.
+  return STATUS_ORDER.map((kind) => {
+    const list = byStatus.get(kind)
+    if (!list || list.length === 0) return null
+    return { kind, label: STATE_LABEL[kind], rows: list.map((t) => t.row) }
+  }).filter((s): s is StatusSection => s !== null)
 }

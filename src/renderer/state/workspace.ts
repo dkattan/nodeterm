@@ -1,7 +1,7 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
-import { agentConfig, mintsSessionId } from '@shared/agents/config'
+import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -93,6 +93,8 @@ export interface NodeData {
   highScore?: number
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this node through the shared model gateway. */
+  agentModel?: string
   /**
    * Claude nodes only: the managed Claude account (config-dir isolated) this node runs under.
    * Persisted so cold-restore resume reads the transcript from the right account dir.
@@ -373,7 +375,8 @@ export function createAgentNode(
   // learning its id from hooks exactly as before. Inheritance-aware: a custom agent with
   // baseAgent:'claude' mints an id too (capabilityAgentId resolves it to claude).
   const cliCaps = claudeCliCapsNow()
-  const mintedSessionId = mintsSessionId(agentId) && cliCaps.sessionIdFlag ? uuid() : undefined
+  const sessionIdFlagSupported = supportsSessionIdFlag(agentId, cliCaps.sessionIdFlag)
+  const mintedSessionId = sessionIdFlagSupported ? uuid() : undefined
   // Command assembly is delegated to the ONE shared builder (src/shared/agents/launch.ts), used by
   // fresh launch AND cold-restore resume, so a custom agent's baseAgent/args/expansion are applied
   // identically in both paths. The renderer has no process.env, so expansion here runs against an
@@ -392,7 +395,7 @@ export function createAgentNode(
       initialPrompt,
       permissionMode,
       sessionId: mintedSessionId,
-      sessionIdFlagSupported: cliCaps.sessionIdFlag,
+      sessionIdFlagSupported,
       // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
@@ -1274,6 +1277,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         commitOid: n.commitOid,
         highScore: n.highScore,
         agentId,
+        agentModel: n.agentModel,
         accountId: n.accountId,
         agentSessionId: n.agentSessionId,
         pendingLaunch: n.pendingLaunch,
@@ -1339,6 +1343,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
         agentId: n.data.agentId,
+        agentModel: n.data.agentModel,
         accountId: n.data.accountId,
         agentSessionId: n.data.agentSessionId,
         pendingLaunch: n.data.pendingLaunch,
