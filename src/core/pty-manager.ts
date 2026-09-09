@@ -31,6 +31,7 @@ import {
   remotePasteDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remoteShowEnvironmentArgs,
   remotePaneOwnerCombinedArgs,
   remotePaneProcessArgs,
   remoteTerminateForegroundArgs,
@@ -128,6 +129,8 @@ import {
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
+import { maskPtyEnv, parseTmuxSessionEnv } from './pty-env-info'
+import type { PtyEnvInfo, PtyEnvVar } from '../shared/types'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -665,6 +668,8 @@ interface Session {
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
+  /** Masked snapshot of the fully composed environment for this session generation. */
+  spawnEnv?: PtyEnvVar[]
   /**
    * This session is backed by the session-host process (docs/windows-session-host.md), not a
    * local tmux — selected only when no local tmux was found (primarily Windows). `session.proc`
@@ -1729,6 +1734,7 @@ export class PtyManager {
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
     platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
+    platform().handle(IPC.ptyEnvInfo, (persistKey: string) => this.envInfo(persistKey))
     platform().handle(IPC.ptyTerminateForeground, (persistKey: string, expectedAgentId?: string) =>
       this.terminateForeground(persistKey, expectedAgentId)
     )
@@ -2796,6 +2802,12 @@ export class PtyManager {
       customEnvMerged = merged.env
     }
 
+    // `env` is now fully composed. Remote sessions compose their environment on the host, so
+    // their fallback is the remote tmux session environment rather than this local SSH client env.
+    const spawnEnvCapture: PtyEnvVar[] | undefined = options.sshRemote
+      ? undefined
+      : maskPtyEnv(env)
+
     const settings = this.getSettings()
     let file: string
     let args: string[]
@@ -3180,6 +3192,7 @@ export class PtyManager {
       unwatchedSince: null,
       pausedBy: new Set<string>(),
       accountFallback,
+      spawnEnv: spawnEnvCapture,
       sessionHost: useSessionHost
     }
     // Both shared timers are armed by the first session that needs them: the scrollback snapshots
@@ -4040,6 +4053,54 @@ export class PtyManager {
       return stdout.trim() || null
     } catch {
       return null
+    }
+  }
+
+  /** Return the session's spawn environment with secrets already masked in core. A live session
+   * created before capture support falls back to tmux's shell-formatted environment output. */
+  async envInfo(persistKey: string): Promise<PtyEnvInfo> {
+    if (typeof persistKey !== 'string' || !persistKey) {
+      return { source: 'unavailable', vars: [] }
+    }
+    const live = this.liveSessionForPersistKey(persistKey)
+    if (live?.sessionHost) {
+      return live.spawnEnv
+        ? { source: 'spawn', vars: live.spawnEnv }
+        : { source: 'unavailable', vars: [] }
+    }
+    if (live?.spawnEnv) return { source: 'spawn', vars: live.spawnEnv }
+
+    const target = sessionName(persistKey)
+    const sshRemote = live?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return { source: 'unavailable', vars: [] }
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteShowEnvironmentArgs(sshRemote.conn, sshRemote.controlPath, target)
+        )
+        return { source: 'tmux', vars: parseTmuxSessionEnv(stdout) }
+      } catch {
+        return { source: 'unavailable', vars: [] }
+      }
+    }
+
+    if (!this.tmuxPath) return { source: 'unavailable', vars: [] }
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'show-environment',
+        '-s',
+        '-t',
+        target
+      ])
+      return { source: 'tmux', vars: parseTmuxSessionEnv(stdout) }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[pty] env-info for ${persistKey}: tmux session env unavailable — ${message}`)
+      return { source: 'unavailable', vars: [] }
     }
   }
 
