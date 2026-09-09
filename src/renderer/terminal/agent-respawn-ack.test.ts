@@ -6,6 +6,10 @@ import {
   reportAgentRespawn
 } from './agent-respawn-ack'
 
+import { DELIVERY_ATTEMPTS, VERIFY_TIMEOUT_MS } from './command-delivery'
+import { RESTART_EXIT_TIMEOUT_MS } from './agent-restart'
+import { AGENT_RESPAWN_PROCESS_TIMEOUT_MS } from './agent-respawn-process'
+
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => {
   __resetAgentRespawnAckForTests()
@@ -42,6 +46,22 @@ describe('agent respawn acknowledgements', () => {
       ok: false,
       detail: 'the replacement terminal did not become ready in time'
     })
+  })
+
+  it('allows a retried resume to fall back fresh and finish process proof', async () => {
+    const ticket = beginAgentRespawn('fallback-node')
+    // Project preflight, both shell settles and echo-verification windows, the missing-session
+    // shell probe, then proof of the replacement process. A 20-second ticket expired mid-fallback.
+    const elapsed =
+      3_000 +
+      2 * 1_500 +
+      2 * DELIVERY_ATTEMPTS * VERIFY_TIMEOUT_MS +
+      RESTART_EXIT_TIMEOUT_MS +
+      AGENT_RESPAWN_PROCESS_TIMEOUT_MS
+    await vi.advanceTimersByTimeAsync(elapsed)
+    expect(agentRespawnPending('fallback-node', ticket.generation)).toBe(true)
+    expect(reportAgentRespawn('fallback-node', ticket.generation, { ok: true })).toBe(true)
+    await expect(ticket.promise).resolves.toEqual({ ok: true })
   })
 
   it('ignores a late acknowledgement from an older lifecycle', async () => {
