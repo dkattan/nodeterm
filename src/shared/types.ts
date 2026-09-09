@@ -385,6 +385,10 @@ export interface CanvasNodeState {
   agentId?: AgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
+  /** Exact model id emitted by the launch assembler; may include an internal `[1m]` marker. */
+  agentLaunchModel?: string
+  /** Context window baked into this session's launch environment, when discovery knew it. */
+  agentLaunchContextWindow?: number
   /**
    * One-shot "Restart on subscription" flag: when set, the next `transport.create` strips gateway +
    * inherited provider env (per `vanillaEnvStripPattern`) so the agent resumes against its own

@@ -1230,6 +1230,17 @@ else, and its context links must keep classifying across restarts).
   first sorted discovered id. An empty catalogue emits nothing rather than guessing an id the key
   may not serve. This route is independent of the parent model's context window, and travels through
   the same local/tmux or staged remote environment path as the other gateway variables.
+  **Launch records keep context meters truthful across model switches.** `agentModel` persists the
+  user's requested catalogue choice for later restarts, while `agentLaunchModel` and
+  `agentLaunchContextWindow` record the exact model id and discovered window during initial command
+  assembly and after an accepted relaunch. Context meters use that record for the label and
+  denominator while keeping the
+  transcript's token count; this avoids showing a replayed pre-switch model or window until the next
+  assistant row arrives. Hand-launched and older sessions fall back to transcript metadata, with
+  `core/model-window.ts` consulting `PtyManager`'s current scope-checked catalogue for discovered
+  windows. Exact ids, optional `[1m]` spelling, and the final provider path segment match; a known
+  family window remains the floor, and a settings or credential change immediately removes the old
+  catalogue from consideration.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
