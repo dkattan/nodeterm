@@ -507,6 +507,10 @@ export interface CanvasNodeState {
   agentId?: AgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
+  /** Exact model id emitted by the launch assembler; may include an internal `[1m]` marker. */
+  agentLaunchModel?: string
+  /** Context window baked into this session's launch environment, when discovery knew it. */
+  agentLaunchContextWindow?: number
   /**
    * Agent nodes started on a GitHub issue ("Start with agent" on an issue card, or
    * `open-agent --issue`): WHICH issue this session works on. It drives the binding chips (the
@@ -1261,21 +1265,11 @@ export interface PtyApi {
   /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
    *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
-<<<<<<< New base: Merge pull request #1086 from FabricioCasali/fix/list-agent-state
-  recycle(persistKey: string): void
+  recycle(persistKey: string): Promise<void>
   /** Suggest a terminal title from its recent output via the configured AI agent. `accountId` is
    *  the node's managed Claude account (trailing + optional: absent = system `~/.claude`), so the
    *  naming request runs under the same login the node itself does. */
   generateName(persistKey: string, cwd: string, accountId?: string): Promise<GitResult>
-||||||| Common ancestor
-  recycle(persistKey: string): void
-  /** Suggest a terminal title from its recent output via the configured AI agent. */
-  generateName(persistKey: string, cwd: string): Promise<GitResult>
-=======
-  recycle(persistKey: string): Promise<void>
-  /** Suggest a terminal title from its recent output via the configured AI agent. */
-  generateName(persistKey: string, cwd: string): Promise<GitResult>
->>>>>>> Current commit: fix(terminal): make agent restarts verifiable
   /** Suggest a group title from its member terminals' recent output via the configured AI agent. */
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */

@@ -28,14 +28,8 @@ import {
 } from './config'
 import { withPermissionMode, type ApprovalCaps } from './approval-mode'
 import { resolveAgentConfig } from './custom-agent'
-<<<<<<< New base: feat(gateway): configure the model discovery path
-import { withAgentModel } from './model-gateway'
-import { withCodexNoDaemon } from './codex-daemon'
-||||||| Common ancestor
-import { withAgentModel } from './model-gateway'
-=======
 import { withAgentModel, claudeAutocompactFor, type GatewayModel } from './model-gateway'
->>>>>>> Current commit: feat(gateway): apply discovered context limits
+import { withCodexNoDaemon } from './codex-daemon'
 
 export interface LaunchInputs {
   agentId: AgentId
@@ -301,16 +295,10 @@ export function assembleResumeCommand(
   const withMode = inputs.permissionMode
     ? withPermissionMode(base, capId, inputs.permissionMode, inputs.approvalCaps ?? {})
     : base
-<<<<<<< New base: feat(gateway): configure the model discovery path
   const command = withCodexNoDaemon(
-    withAgentModel(withMode, capId, inputs.model),
+    withAgentModel(withMode, capId, modelId),
     capId,
     inputs.approvalCaps ?? {}
   )
-||||||| Common ancestor
-  const command = withAgentModel(withMode, capId, inputs.model)
-=======
-  const command = withAgentModel(withMode, capId, modelId)
->>>>>>> Current commit: feat(gateway): apply discovered context limits
   return { command, missingEnv: [...m1, ...m2] }
 }

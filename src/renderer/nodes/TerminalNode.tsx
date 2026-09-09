@@ -194,15 +194,9 @@ import {
   settleRecycledNode,
   type ExitPhaseOutcome,
   type PauseOutcome,
-<<<<<<< New base: Merge pull request #1086 from FabricioCasali/fix/list-agent-state
   type RecyclePatch,
-  type ResumePhaseOutcome
-||||||| Common ancestor
-  type ResumePhaseOutcome
-=======
   type ResumePhaseOutcome,
   type RestartRefusalReason
->>>>>>> Current commit: fix(terminal): make agent restarts verifiable
 } from '../terminal/agent-restart'
 import { coldResumeDecision, shouldProbeTranscript } from '../terminal/cold-resume-session'
 import type { TranscriptPresence } from '@shared/types'
@@ -311,13 +305,19 @@ import {
   reportsOwnCopy,
   agentConfig,
   capabilityAgentId,
+  canSwitchModel,
+  vanillaEnvStripPattern,
   supportsSessionIdFlag,
   type AgentId
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleLaunchCommand, assembleResumeCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
-import { normalizedAgentModel } from '@shared/agents/model-gateway'
+import {
+  claudeAutocompactFor,
+  modelContextWindow,
+  normalizedAgentModel
+} from '@shared/agents/model-gateway'
 import { useModelGateway } from '../state/modelGateway'
 import {
   ensureActivePermissionMode,
@@ -4219,6 +4219,11 @@ export function TerminalNode({
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
           const models = useModelGateway.getState().models
+          const coldLaunchModel =
+            data.agentModel && canSwitchModel(agentId)
+              ? claudeAutocompactFor(agentId, data.agentModel, models).modelId
+              : undefined
+          const coldLaunchContextWindow = modelContextWindow(coldLaunchModel, models)
           const { command: cmd } = assembleResumeCommand(
             {
               agentId,
@@ -4260,6 +4265,10 @@ export function TerminalNode({
                 })
                 return
               }
+              updateNodeData(id, {
+                agentLaunchModel: coldLaunchModel,
+                agentLaunchContextWindow: coldLaunchContextWindow
+              })
               if (!agentRespawnPending(id, respawnGeneration)) return
               modelRespawnTrace('cold-resume.agent-proof-begin', {
                 nodeId: id,
@@ -4491,12 +4500,7 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-<<<<<<< New base: Merge pull request #1086 from FabricioCasali/fix/list-agent-state
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, beforeRecycle?: () => Promise<RecyclePatch | void>) => {
-||||||| Common ancestor
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, beforeRecycle?: () => Promise<Record<string, unknown> | void>) => {
-=======
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, beforeRecycle?: () => Promise<Record<string, unknown> | void>) => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, shouldRestart?: () => boolean, beforeRecycle?: () => Promise<RecyclePatch | void>) => {
 
         modelRespawnTrace('node-restart.begin', {
           nodeId: id,
@@ -4522,7 +4526,6 @@ export function TerminalNode({
           })
           useAgentStatus.getState().setLastRestartRefusal(id, { reason, detail })
         }
->>>>>>> Current commit: fix(terminal): make agent restarts verifiable
         const st = useAgentStatus.getState().byId[id]
         const currentNode = getNode(id)
         const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
@@ -4703,6 +4706,14 @@ export function TerminalNode({
               getNode(id)?.data.agentModel as string | undefined
             )
         const gatewayModels = useModelGateway.getState().models
+        const selectedLaunchModel =
+          selectedModel && canSwitchModel(target)
+            ? claudeAutocompactFor(target, selectedModel, gatewayModels).modelId
+            : undefined
+        const selectedLaunchContextWindow = modelContextWindow(
+          selectedLaunchModel,
+          gatewayModels
+        )
         // A model switch must rebuild the terminal session: URL/key env was fixed when that shell
         // was spawned and may have been configured AFTER this node was created. Do not type the
         // harness's slash-exit command here — an agent composer can treat it as prompt text. Core
@@ -4840,7 +4851,8 @@ export function TerminalNode({
           refuse('missing-env', missingEnv.join(', '))
           return 'not-eligible'
         }
-        return performRestartResume({
+        let usedColdRespawn = false
+        const outcome = await performRestartResume({
           // Source and target were proven to share one capability base above, so this resolves to
           // the same exit + resume grammar while the explicit command selects the target binary.
           agentId: target,
@@ -4862,6 +4874,10 @@ export function TerminalNode({
             session.source === 'relay'
               ? undefined
               : () => {
+                  // The cold-restore delivery records the catalogue it actually assembles after
+                  // the recycle. Keep that later snapshot authoritative if settings change while
+                  // the old pane is being replaced.
+                  usedColdRespawn = true
                   modelRespawnTrace('node-restart.force-respawn', {
                     nodeId: id,
                     sourceAgentId,
@@ -4887,6 +4903,13 @@ export function TerminalNode({
             else cleanups.push(cancel)
           }
         })
+        if (outcome === 'restarted' && !usedColdRespawn) {
+          updateNodeData(id, {
+            agentLaunchModel: selectedLaunchModel,
+            agentLaunchContextWindow: selectedLaunchContextWindow
+          })
+        }
+        return outcome
       })
     )
 
@@ -6495,8 +6518,16 @@ export function TerminalNode({
             SSH {(data.ssh as SshConnection).user}@{(data.ssh as SshConnection).host}
           </span>
         ) : null}
-        {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} nodeId={id} remote={!!remoteSession} agentId={agentId} />}
-        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
+        {showUsage && (
+          <ContextMeter
+            sessionId={status?.sessionId ?? null}
+            nodeId={id}
+            remote={!!remoteSession}
+            agentId={agentId}
+            nodeModel={data.agentLaunchModel as string | undefined}
+            nodeContextWindow={data.agentLaunchContextWindow as number | undefined}
+          />
+        )}        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
         {/* This terminal is broadcast by a live link — never hideable (live-link.guard.test.ts).
             Only through the LOCAL session: a relay tab's node with the same id is not ours (R57). */}
