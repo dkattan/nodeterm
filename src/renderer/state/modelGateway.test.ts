@@ -36,6 +36,53 @@ describe('model gateway catalogue provenance', () => {
     resolve({ models: [{ id: 'old', contextWindow: 1_000_000 }] })
     await pending
 
-    expect(useModelGateway.getState()).toMatchObject({ models: [], status: 'idle' })
+    expect(useModelGateway.getState()).toMatchObject({
+      models: [],
+      status: 'idle',
+      discoveryAt: undefined
+    })
+  })
+
+  it('does not advance completion when an older request lands after the current one', async () => {
+    const resolves: Array<(value: { models: Array<{ id: string }> }) => void> = []
+    vi.mocked(window.nodeTerminal.agent.discoverModels).mockImplementation(
+      () => new Promise((resolve) => resolves.push(resolve))
+    )
+    const older = useModelGateway.getState().discover({ baseUrl: 'https://old.test', apiKey: 'old' })
+    const current = useModelGateway.getState().discover({ baseUrl: 'https://new.test', apiKey: 'new' })
+
+    resolves[1]({ models: [{ id: 'current' }] })
+    await current
+    const completion = useModelGateway.getState().discoveryAt
+    resolves[0]({ models: [{ id: 'stale' }] })
+    await older
+
+    expect(useModelGateway.getState()).toMatchObject({
+      models: [{ id: 'current' }],
+      status: 'ready',
+      discoveryAt: completion
+    })
+  })
+
+  it('advances only the current completion, including ready-empty and error results', async () => {
+    vi.mocked(window.nodeTerminal.agent.discoverModels)
+      .mockResolvedValueOnce({ models: [] })
+      .mockResolvedValueOnce({ models: [], error: 'unavailable' })
+
+    await useModelGateway.getState().discover({ baseUrl: 'https://gateway.test', apiKey: 'key' })
+    expect(useModelGateway.getState()).toMatchObject({
+      models: [],
+      status: 'ready',
+      discoveryAt: expect.any(Number)
+    })
+    const firstCompletion = useModelGateway.getState().discoveryAt
+
+    await useModelGateway.getState().discover({ baseUrl: 'https://gateway.test', apiKey: 'key' })
+    expect(useModelGateway.getState()).toMatchObject({
+      models: [],
+      status: 'error',
+      discoveryAt: expect.any(Number)
+    })
+    expect(useModelGateway.getState().discoveryAt).toBeGreaterThan(firstCompletion ?? 0)
   })
 })
