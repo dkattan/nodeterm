@@ -15,7 +15,10 @@ interface PendingRespawn {
 
 const pending = new Map<string, PendingRespawn>()
 let nextGeneration = 0
-export const AGENT_RESPAWN_ACK_TIMEOUT_MS = 20_000
+// A missing-session response adds a shell probe and a second settled/verified delivery before
+// process proof. Those bounded stages alone can take 29 seconds; allow cold PTY creation and
+// project/transcript preflight too, while retaining one finite deadline for the whole attempt.
+export const AGENT_RESPAWN_ACK_TIMEOUT_MS = 60_000
 
 function settle(nodeId: string, generation: number, result: AgentRespawnAck): boolean {
   const entry = pending.get(nodeId)
