@@ -11,6 +11,8 @@ interface ModelGatewayState {
   models: GatewayModel[]
   status: ModelDiscoveryStatus
   error: string
+  /** Monotonic completion marker for the current, non-superseded discovery request. */
+  discoveryAt?: number
   discover(settings: ModelGatewaySettings): Promise<void>
   clear(): void
 }
@@ -47,12 +49,13 @@ export const useModelGateway = create<ModelGatewayState>((set) => ({
     set({
       models: result.models,
       status: result.error ? 'error' : 'ready',
-      error: result.error ?? ''
+      error: result.error ?? '',
+      discoveryAt: seq
     })
   },
 
   clear() {
     requestSeq++
-    set({ models: [], status: 'idle', error: '' })
+    set({ models: [], status: 'idle', error: '', discoveryAt: undefined })
   }
 }))
