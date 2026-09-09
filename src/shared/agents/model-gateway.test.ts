@@ -5,6 +5,7 @@ import {
   modelGatewayEnv,
   modelGatewayCredentialKind,
   modelGatewayRoutes,
+  modelContextWindow,
   modelsForAgent,
   parseGatewayModels,
   parseModelGatewayEnvReference,
@@ -443,5 +444,20 @@ describe('Claude gateway subagent routing', () => {
     expect(claudeSubagentEnvFor('codex', models)).toEqual({})
     expect(claudeSubagentModelFor([], 'vllm/zeta')).toBeUndefined()
     expect(tmuxUpdateEnvironmentLine()).toContain('CLAUDE_CODE_SUBAGENT_MODEL')
+  })
+})
+
+describe('modelContextWindow', () => {
+  const models = [{ id: 'vllm/GLM-5.3', contextWindow: 400_000 }]
+
+  it('matches either plain or [1m]-suffixed spelling', () => {
+    expect(modelContextWindow('vllm/GLM-5.3', models)).toBe(400_000)
+    expect(modelContextWindow('vllm/GLM-5.3[1m]', models)).toBe(400_000)
+  })
+
+  it('returns undefined for an absent model or invalid window', () => {
+    expect(modelContextWindow(undefined, models)).toBeUndefined()
+    expect(modelContextWindow('other', models)).toBeUndefined()
+    expect(modelContextWindow('bad', [{ id: 'bad', contextWindow: Number.NaN }])).toBeUndefined()
   })
 })

@@ -139,6 +139,7 @@ import {
 import { foregroundProcessGroup, parsePaneProcess } from './pane-process'
 import { isShellCommand } from '../shared/agents/pane'
 import { modelRespawnErrorKind, modelRespawnTrace } from '../shared/model-respawn-trace'
+import { setGatewayModelWindowSource } from './model-window'
 // Third persistence backend, selected when no local tmux was found (primarily Windows, where
 // tmux does not exist at all) — see docs/windows-session-host.md. Deliberately a thin, separate
 // module rather than inline here: this is the one narrow seam this file needed to grow for a
@@ -1503,6 +1504,7 @@ export class PtyManager {
   ): void {
     this.getSettings = getSettings
     this.getModelGatewaySecret = getModelGatewaySecret
+    setGatewayModelWindowSource(() => this.gatewayModelsForCurrent())
     // Register the custom-id → baseAgent resolver so the capability predicates in
     // shared/agents/config (hasHooks, canResume, mintsSessionId, hasPermissionMode,
     // canControlCanvas, …) resolve a custom agent's INHERITED harness. config.ts takes only an id

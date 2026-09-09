@@ -12,6 +12,7 @@ import {
 } from '../shared/agents/model-gateway'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { currentModelGatewayDiscoveryScope } from './model-gateway-scope'
+import { cachedWindowFor } from './model-window'
 
 const gatewayScope = (
   settings: { baseUrl: string; apiKey: string; discoveryPath?: string },
@@ -693,9 +694,13 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         () => storedSecret
       )
       m.registerIpc()
-      const models = [{ id: 'anthropic/claude-opus-5', contextWindow: 1_000_000 }]
+      const models = [
+        { id: 'anthropic/claude-opus-5', contextWindow: 1_000_000 },
+        { id: 'vllm/custom-model', contextWindow: 333_000 }
+      ]
 
       m.setGatewayModels(gatewayScope(gateway, storedSecret), models)
+      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
       await create(80, 24, 'scope-stored-old', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
@@ -705,6 +710,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
 
       process.env.NODETERM_TEST_GATEWAY_KEY = 'env-old'
       gateway = {
@@ -712,6 +718,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         apiKey: '${env:NODETERM_TEST_GATEWAY_KEY}'
       }
       m.setGatewayModels(gatewayScope(gateway, null, process.env), models)
+      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
       await create(80, 24, 'scope-env-old', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
@@ -721,6 +728,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
 
       gateway = {
         baseUrl: 'https://bifrost.example.test',
@@ -728,11 +736,13 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         discoveryPath: '/v1/models'
       }
       m.setGatewayModels(gatewayScope(gateway), models)
+      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
       gateway = { ...gateway, discoveryPath: '/openai/v1/models' }
       await create(80, 24, 'scope-path-new', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
     } finally {
       if (savedEnv === undefined) delete process.env.NODETERM_TEST_GATEWAY_KEY
       else process.env.NODETERM_TEST_GATEWAY_KEY = savedEnv

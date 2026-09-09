@@ -497,3 +497,15 @@ export function claudeSubagentEnvFor(
   const model = claudeSubagentModelFor(models, defaultModel)
   return model ? { [CLAUDE_CODE_SUBAGENT_MODEL_KEY]: model } : {}
 }
+
+/** Current reported window for either plain or `[1m]` spelling of one model id. */
+export function modelContextWindow(
+  modelId: string | undefined,
+  models: readonly GatewayModel[]
+): number | undefined {
+  const id = modelId?.trim()
+  if (!id) return undefined
+  const base = id.replace(/\[1m\]$/, '')
+  const value = models.find((model) => model.id.replace(/\[1m\]$/, '') === base)?.contextWindow
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
