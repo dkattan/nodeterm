@@ -507,6 +507,10 @@ export interface CanvasNodeState {
   agentId?: AgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
+  /** Exact model id emitted by the launch assembler; may include an internal `[1m]` marker. */
+  agentLaunchModel?: string
+  /** Context window baked into this session's launch environment, when discovery knew it. */
+  agentLaunchContextWindow?: number
   /**
    * Agent nodes started on a GitHub issue ("Start with agent" on an issue card, or
    * `open-agent --issue`): WHICH issue this session works on. It drives the binding chips (the
