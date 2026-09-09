@@ -811,6 +811,8 @@ interface Session {
   accountFallback?: boolean
   /** Masked snapshot of the fully composed environment for this session generation. */
   spawnEnv?: PtyEnvVar[]
+  /** Masked candidate withheld until the backend proves this generation was freshly created. */
+  pendingSpawnEnv?: PtyEnvVar[]
   /**
    * This session is backed by the session-host process (docs/windows-session-host.md), not a
    * local tmux — selected only when no local tmux was found (primarily Windows). `session.proc`
@@ -2714,6 +2716,14 @@ export class PtyManager {
       throw err
     }
     const spawned = this.sessions.get(sessionId)
+    // A tmux attach runs a newly composed CLIENT env beside an older pane. Publish that env only
+    // when the pre-spawn probe proved this generation was created; warm sessions fall back to the
+    // tmux session environment instead. Session-host learns the same fact asynchronously below.
+    if (spawned && !spawned.sessionHost) {
+      spawned.spawnEnv = fresh ? spawned.pendingSpawnEnv : undefined
+      spawned.pendingSpawnEnv = undefined
+    }
+
     if (spawnSlot) releaseSpawnSlotOnOutput(spawned, spawnSlot)
     // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
     // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
@@ -2752,6 +2762,8 @@ export class PtyManager {
         }
         fresh = info.fresh
         screen = info.screen
+        spawned.spawnEnv = fresh ? spawned.pendingSpawnEnv : undefined
+        spawned.pendingSpawnEnv = undefined
         // Session-host registration is provisional until the exact ready barrier above succeeds.
         // Only now is an owner's resurrection real enough to remove a prior deletion tombstone.
         if (spawned.indexKey) this.tombstones.delete(spawned.indexKey)
@@ -3760,12 +3772,6 @@ export class PtyManager {
       )
     }
 
-    // `env` is now fully composed. Remote sessions compose their environment on the host, so
-    // their fallback is the remote tmux session environment rather than this local SSH client env.
-    const spawnEnvCapture: PtyEnvVar[] | undefined = options.sshRemote
-      ? undefined
-      : maskPtyEnv(env)
-
     const settings = this.getSettings()
     let file: string
     let args: string[]
@@ -4235,7 +4241,9 @@ export class PtyManager {
       unwatchedSince: null,
       pausedBy: new Set<string>(),
       accountFallback,
-      spawnEnv: spawnEnvCapture,
+      // `env` is fully composed by this point. SSH would capture the local client environment,
+      // while detached paths provide no freshness proof, so neither publishes a candidate.
+      pendingSpawnEnv: !options.sshRemote && !sinks ? maskPtyEnv(env) : undefined,
       sessionHost: useSessionHost,
       ...(isWatcherCreate(options) ? { watcherClient: true } : {}),
       ...(useLocalZellij ? { zellij: true } : {})
@@ -5520,6 +5528,7 @@ export class PtyManager {
       return { source: 'unavailable', vars: [] }
     }
     const live = this.liveSessionForPersistKey(persistKey)
+    if (!live) return { source: 'unavailable', vars: [] }
     if (live?.sessionHost) {
       return live.spawnEnv
         ? { source: 'spawn', vars: live.spawnEnv }
@@ -5769,10 +5778,6 @@ export class PtyManager {
     })
     if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN)
       return finish('refused', 'invalid-node-id')
-    // Refused on Zellij (ZELLIJ_BACKEND_GAPS): a signal aimed at a process group read off `ps`
-    // without the pane-owner proof the tmux leg has would be a guess at which process to kill.
-    if (this.isZellij(persistKey, this.liveSessionForPersistKey(persistKey)))
-      return finish('refused', 'zellij-unsupported')
     let expectedAgentPid: number | undefined
     let verifiedPane: PaneOwner | undefined
     let expectedBinaries: readonly string[] | null | undefined
