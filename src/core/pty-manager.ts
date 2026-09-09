@@ -106,14 +106,27 @@ import {
 } from './codex-identity-proxy'
 import { ensureNodeToken, ensureRemoteNodeToken, sweepNodeToken } from './agents/node-token-service'
 import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
-import { hasSharedIdentity, setCustomAgentBaseResolver, vanillaEnvStripPattern, type AgentId } from '../shared/agents/config'
+import {
+  capabilityAgentId,
+  hasSharedIdentity,
+  setCustomAgentBaseResolver,
+  vanillaEnvStripPattern,
+  type AgentId
+} from '../shared/agents/config'
 import { findCustomAgent } from '../shared/agents/custom-agent'
 import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
 import {
+  AUTOCOMPACT_ENV_KEYS,
   MODEL_GATEWAY_ENV_KEYS,
+  claudeAutocompactFor,
   modelGatewayEnv,
-  tmuxUpdateEnvironmentLine
+  tmuxUpdateEnvironmentLine,
+  type GatewayModel
 } from '../shared/agents/model-gateway'
+import {
+  currentModelGatewayDiscoveryScope,
+  type ModelGatewayDiscoveryScope
+} from './model-gateway-scope'
 import { leadPaneHookLines } from '../shared/tmux-lead-pane'
 import {
   remoteSessionEnvAvailable,
@@ -928,6 +941,11 @@ export class PtyManager {
   private readProjectSpawnOverrides: ProjectSpawnOverridesReader | null = null
   /** "Which SSH host owns this node?", from the persisted index — see `setRemoteNodeOwner`. */
   private remoteNodeOwner: RemoteNodeOwnerResolver | null = null
+  /** Latest successfully discovered catalogue and the exact route/credential scope that produced it. */
+  private gatewayModelSnapshot: {
+    scope: ModelGatewayDiscoveryScope
+    models: GatewayModel[]
+  } | null = null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1602,6 +1620,24 @@ export class PtyManager {
    *  conf-baked set), so a custom agent's spawn costs at most one `set-option` per NEW key. */
   private updateEnvKeys: Set<string> | null = null
 
+  /** Replace the discovered catalogue snapshot. Empty success deliberately clears old models. */
+  setGatewayModels(scope: ModelGatewayDiscoveryScope, models: GatewayModel[]): void {
+    this.gatewayModelSnapshot = { scope, models: [...models] }
+  }
+
+  /** Models from the exact gateway configuration and resolved credential that are current now. */
+  private gatewayModelsForCurrent(): GatewayModel[] {
+    const settings = this.getSettings().modelGateway
+    const scope = currentModelGatewayDiscoveryScope(
+      settings,
+      this.getModelGatewaySecret(),
+      process.env
+    )
+    return scope && this.gatewayModelSnapshot?.scope === scope
+      ? this.gatewayModelSnapshot.models
+      : []
+  }
+
   /** Make the shared tmux server copy these client-env names into new sessions. The conf bakes
    *  the fixed gateway list; a CUSTOM agent's env keys are user-defined and can only be appended
    *  at runtime. Names ride the `set-option` argv — names only, values never (values reach tmux
@@ -1616,7 +1652,7 @@ export class PtyManager {
     )
     if (!wanted.length) return
     if (!this.updateEnvKeys) {
-      this.updateEnvKeys = new Set(MODEL_GATEWAY_ENV_KEYS)
+      this.updateEnvKeys = new Set([...MODEL_GATEWAY_ENV_KEYS, ...AUTOCOMPACT_ENV_KEYS])
       try {
         const out = execFileSync(
           this.tmuxPath,
@@ -2820,8 +2856,19 @@ export class PtyManager {
             this.getModelGatewaySecret()
           )
         : {}
+    const gatewayModels = this.gatewayModelsForCurrent()
+    const autocompact =
+      !stripRe && options.agentId
+        ? claudeAutocompactFor(
+            capabilityAgentId(options.agentId as AgentId),
+            options.agentModel,
+            gatewayModels
+          )
+        : { modelId: undefined, env: {} }
+    const autocompactEnv = autocompact.env
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
+      for (const [k, v] of Object.entries(autocompactEnv)) env[k] = v
       // Strip inherited provider vars so a vanilla session does not fall back to a LaunchAgent-set
       // ANTHROPIC_BASE_URL instead of the subscription. Local only — see the note above.
       if (stripRe) {
@@ -2864,6 +2911,23 @@ export class PtyManager {
       for (const [k, v] of Object.entries(merged.env)) env[k] = v
       for (const w of merged.warnings) console.warn(w)
       customEnvMerged = merged.env
+    }
+
+    // The model marker and the compaction window are one mechanism. A known catalogue must never
+    // produce only one half; an empty cache at cold boot remains fail-open so persisted suffixed
+    // sessions can mount while the first discovery request is still in flight.
+    const envHasWindow = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' in autocompactEnv
+    if (autocompact.modelId?.endsWith('[1m]') && !envHasWindow && gatewayModels.length) {
+      throw new Error(
+        `Session ${options.persistKey} refuses to spawn: model '${options.agentModel}' assembled to ` +
+          `${autocompact.modelId} without CLAUDE_CODE_AUTO_COMPACT_WINDOW.`
+      )
+    }
+    if (envHasWindow && autocompact.modelId && !autocompact.modelId.endsWith('[1m]')) {
+      throw new Error(
+        `Session ${options.persistKey} refuses to spawn: CLAUDE_CODE_AUTO_COMPACT_WINDOW was set ` +
+          `for an unsuffixed model '${autocompact.modelId}'.`
+      )
     }
 
     const settings = this.getSettings()
@@ -2983,7 +3047,11 @@ export class PtyManager {
       // not delivered and the agent fails loudly in its pane (fail-open, never a fallback to argv).
       // The project's env joins that same 0600 file — same reason, same ordering as the local leg
       // (gateway, then project, then the custom agent's own values on top).
-      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv, ...(projectEnv ?? {}) }
+      const remoteEnvPairs: Record<string, string> = {
+        ...gatewayEnv,
+        ...autocompactEnv,
+        ...(projectEnv ?? {})
+      }
       for (const kv of remoteCustomEnv.args) {
         const eq = kv.indexOf('=')
         if (eq > 0) remoteEnvPairs[kv.slice(0, eq)] = kv.slice(eq + 1)
@@ -3003,7 +3071,7 @@ export class PtyManager {
           envFile,
           sessionEnvFileContent(remoteEnvPairs)
         )
-        const baked = new Set<string>(MODEL_GATEWAY_ENV_KEYS)
+        const baked = new Set<string>([...MODEL_GATEWAY_ENV_KEYS, ...AUTOCOMPACT_ENV_KEYS])
         remoteSessionEnv = {
           file: envFile,
           extraKeys: Object.keys(remoteEnvPairs).filter((k) => !baked.has(k))

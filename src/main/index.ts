@@ -1292,7 +1292,11 @@ app.whenReady().then(async () => {
   sshStore.registerIpc()
   // Gateway discovery/credential IPC (peer-reachable by design; the renderer never receives a
   // stored literal key, and discovery resolves key REFERENCES only for the saved gateway URL).
-  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
+  registerAgentEnvIpc(
+    () => settingsStore.get().modelGateway,
+    gatewayCredentials,
+    (scope, models) => ptyManager.setGatewayModels(scope, models)
+  )
   // The `${env:VAR}` snapshot for custom-agent expansion is DESKTOP-WINDOW-ONLY, so it is a raw
   // `ipcMain.handle` on purpose (see the handler-table comment in platform-electron.ts): a
   // `platform().handle` registration would answer relay peers too — a paired phone or remote tab

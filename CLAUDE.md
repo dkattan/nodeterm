@@ -1348,6 +1348,22 @@ else, and its context links must keep classifying across restarts).
   the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
+  **Large-context Claude launches.** Model discovery retains a positive integer context window
+  from `context_length`, `max_context_length`, or `context_window`. For a claude-base agent,
+  `claudeAutocompactFor` appends `[1m]` to a discovered model above 200k and emits
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` plus `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80`; at or below the
+  threshold it strips a stale suffix and emits neither variable. The suffix and variables are one
+  result and must stay paired: the command assembler applies the model id, while `PtyManager`
+  injects the variables into the same local or staged remote spawn environment as the gateway
+  credentials. An unknown catalogue fails open to the unchanged id and no guessed window.
+  Successful core discovery publishes a single `{scope, models}` snapshot for spawning. The scope
+  is an opaque process-local digest of the normalized discovery route, public credential selector,
+  and exact resolved credential. `PtyManager` consumes it only while it still matches the current
+  settings and secret, so changing a discovery path, environment value, or stored key immediately
+  makes old context metadata ineligible. Renderer settings changes likewise clear the visible
+  catalogue before the debounced replacement request; replacing the stored key explicitly clears
+  it because the persisted secret sentinel itself does not change. Core accepts a discovery result
+  into launch state only when it is the latest request and still matches the saved configuration.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
