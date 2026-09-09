@@ -6,7 +6,7 @@ import {
   reportAgentRespawn
 } from './agent-respawn-ack'
 
-import { DELIVERY_ATTEMPTS, VERIFY_TIMEOUT_MS } from './command-delivery'
+import { DELIVERY_ATTEMPTS, VERIFY_TIMEOUT_MS } from '@shared/command-delivery'
 import { RESTART_EXIT_TIMEOUT_MS } from './agent-restart'
 import { AGENT_RESPAWN_PROCESS_TIMEOUT_MS } from './agent-respawn-process'
 
