@@ -2776,7 +2776,9 @@ export class PtyManager {
     // already-running session — only the next fresh launch.
     const stripRe =
       options.clearEnv || this.getSettings().vanillaLaunchDefault
-        ? vanillaEnvStripPattern((options.agentId ?? 'claude') as AgentId)
+        ? options.agentId
+          ? vanillaEnvStripPattern(options.agentId)
+          : null
         : null
     const gatewayEnv =
       options.agentId && !stripRe
