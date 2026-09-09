@@ -55,6 +55,7 @@ import {
   type PresenceApi,
   type PtyApi,
   type PtyCreateOptions,
+  type PtyEnvInfo,
   type SettingsApi,
   type ClaudeUsage,
   type ProviderUsage,
@@ -303,6 +304,10 @@ export function buildRealApi(
     // have silently switched Eco off for the whole Server Edition rather than degrade it.
     paneOwner: (persistKey) =>
       client.request(IPC.ptyPaneOwner, persistKey).catch(() => null) as Promise<PaneOwner | null>,
+    envInfo: (persistKey) =>
+      client
+        .request(IPC.ptyEnvInfo, persistKey)
+        .catch(() => ({ source: 'unavailable', vars: [] }) as PtyEnvInfo) as Promise<PtyEnvInfo>,
     terminateForeground: (persistKey, expectedAgentId) =>
       client
         .request(IPC.ptyTerminateForeground, persistKey, expectedAgentId)

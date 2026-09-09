@@ -113,6 +113,7 @@ const api: NodeTerminalApi = {
     paneCwd: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCwd, persistKey),
     launchHeadless: (req) => ipcRenderer.invoke(IPC.ptyLaunchHeadless, req),
     paneOwner: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneOwner, persistKey),
+    envInfo: (persistKey) => ipcRenderer.invoke(IPC.ptyEnvInfo, persistKey),
     terminateForeground: (persistKey, expectedAgentId) =>
       ipcRenderer.invoke(IPC.ptyTerminateForeground, persistKey, expectedAgentId),
     agentProcess: (persistKey, expectedAgentId) =>

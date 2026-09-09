@@ -43,6 +43,8 @@ export const IPC = {
    *  over an interactive `ssh` reports as `ssh` — so the hibernation exit asks this instead before
    *  it types `/exit` into a pane. null when the pane cannot be read. */
   ptyPaneOwner: 'pty:pane-owner',
+  /** Read a session's spawn environment with secrets masked in core. */
+  ptyEnvInfo: 'pty:env-info',
   /** Renderer → core: SIGTERM the non-shell foreground process group in this node's pane.
    *  Model switching uses this instead of typing an exit slash-command into an agent composer. */
   ptyTerminateForeground: 'pty:terminate-foreground',

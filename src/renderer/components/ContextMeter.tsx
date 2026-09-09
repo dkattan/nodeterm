@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useContextUsage } from '../state/contextWindow'
 import { useSettings } from '../state/settings'
 import { capabilityAgentId } from '@shared/agents/config'
+import { activeSessionApi } from '../session/session'
 import { barFillPercent, contextFillColor, contextPillText, formatModelLabel, formatTimeAgo, formatTokensShort, percentText } from '../lib/usageFormat'
 import { contextMeterModel, contextMeterUsage } from '../lib/contextMeterModel'
+import type { PtyEnvInfo } from '@shared/types'
 
 /**
  * Per-Claude-node context-window meter. A small header pill (mini-bar + "NN%") that toggles
@@ -32,6 +34,7 @@ export function ContextMeter({
   const percentMode = useSettings((s) => s.settings.usagePercentMode)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const [envResult, setEnvResult] = useState<{ nodeId: string; info: PtyEnvInfo } | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -42,7 +45,30 @@ export function ContextMeter({
     return () => window.removeEventListener('mousedown', onDown)
   }, [open])
 
+  useEffect(() => {
+    if (!open || !nodeId) {
+      setEnvResult(null)
+      return
+    }
+    let cancelled = false
+    setEnvResult(null)
+    activeSessionApi()
+      .pty.envInfo(nodeId)
+      .then((info) => {
+        if (!cancelled) setEnvResult({ nodeId, info })
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEnvResult({ nodeId, info: { source: 'unavailable', vars: [] } })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, nodeId])
+
   if (!usage) return null
+  const env = envResult && envResult.nodeId === nodeId ? envResult.info : null
   // The NUMBER honours the used/remaining/tokens display setting; the bar and its color stay
   // keyed to context FILL, so the severity colors keep meaning the same thing in every mode
   // (issue #78).
@@ -79,12 +105,46 @@ export function ContextMeter({
                 gemini joined USAGE_CAPABLE — a codex popover would have claimed to be claude. */}
             {model ? `${model} · ` : ''}Updated {formatTimeAgo(usage.updatedAt)}
           </div>
+          {nodeId && (
+            <div className="ctx-env">
+              <div className="ctx-env__title">Spawn environment</div>
+              {env?.source === 'unavailable' && (
+                <div className="ctx-env__empty">Not available for this session.</div>
+              )}
+              {env && env.source !== 'unavailable' && (
+                <>
+                  <div className="ctx-env__sub">
+                    {env.source === 'spawn'
+                      ? 'captured when this session started'
+                      : 'read from the tmux session'}
+                  </div>
+                  <div className="ctx-env__vars">
+                    {env.vars.map((variable) => (
+                      <div
+                        className={`ctx-env__var${variable.secret ? ' ctx-env__var--secret' : ''}`}
+                        key={variable.key}
+                      >
+                        <code className="ctx-env__key">{variable.key}</code>
+                        <code
+                          className="ctx-env__value"
+                          title={variable.secret ? 'masked credential' : variable.value}
+                        >
+                          {variable.value}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
       <button
         className="ctx-pill"
         title={`Context window — ${percentText(usedPercent, percentMode)}`}        onClick={(e) => {
           e.stopPropagation()
+          setEnvResult(null)
           setOpen((v) => !v)
         }}
       >
