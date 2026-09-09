@@ -1225,6 +1225,11 @@ else, and its context links must keep classifying across restarts).
   catalogue before the debounced replacement request; replacing the stored key explicitly clears
   it because the persisted secret sentinel itself does not change. Core accepts a discovery result
   into launch state only when it is the latest request and still matches the saved configuration.
+  **Claude subagents use the same gateway catalogue.** A gateway-backed claude-base session sets
+  `CLAUDE_CODE_SUBAGENT_MODEL` to the configured default when that id is listed, otherwise to the
+  first sorted discovered id. An empty catalogue emits nothing rather than guessing an id the key
+  may not serve. This route is independent of the parent model's context window, and travels through
+  the same local/tmux or staged remote environment path as the other gateway variables.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and

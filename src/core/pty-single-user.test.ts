@@ -180,10 +180,12 @@ vi.mock('./pty-devices', async (importOriginal) => ({
 function saveAndScrubAutocompactEnv(): Record<string, string | undefined> {
   const saved: Record<string, string | undefined> = {
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,
-    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,
+    CLAUDE_CODE_SUBAGENT_MODEL: process.env.CLAUDE_CODE_SUBAGENT_MODEL
   }
   delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
   delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+  delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
   return saved
 }
 function restoreAutocompactEnv(saved: Record<string, string | undefined>): void {
@@ -780,6 +782,54 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       // No gateway, no autocompact — the subscription CLI's own window applies.
       expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
       expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    } finally {
+      restoreAutocompactEnv(saved)
+    }
+  })
+
+  it('routes Claude subagents through a served model regardless of the parent window size', async () => {
+    const saved = saveAndScrubAutocompactEnv()
+    try {
+      const { PtyManager } = await import('./pty-manager')
+      let settings = {
+        ...DEFAULT_SETTINGS,
+        modelGatewayDefaultModel: 'vllm/zeta',
+        modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
+      }
+      const m = new PtyManager()
+      m.init(() => settings)
+      m.registerIpc()
+      m.setGatewayModels(gatewayScope(settings.modelGateway), [
+        { id: 'vllm/zeta', contextWindow: 200_000 },
+        { id: 'anthropic/alpha' }
+      ])
+
+      await create(80, 24, 'subagent-default', {
+        agentId: 'claude',
+        agentModel: 'vllm/zeta'
+      })
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('vllm/zeta')
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+
+      settings = { ...settings, modelGatewayDefaultModel: 'missing' }
+      await create(80, 24, 'subagent-fallback', {
+        agentId: 'claude',
+        agentModel: 'vllm/zeta'
+      })
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('anthropic/alpha')
+
+      await create(80, 24, 'subagent-non-claude', {
+        agentId: 'codex',
+        agentModel: 'vllm/zeta'
+      })
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+
+      settings = { ...settings, agentLaunchMode: 'subscription' }
+      await create(80, 24, 'subagent-subscription', {
+        agentId: 'claude',
+        agentModel: 'vllm/zeta'
+      })
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
     } finally {
       restoreAutocompactEnv(saved)
     }

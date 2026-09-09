@@ -111,8 +111,10 @@ import { findCustomAgent } from '../shared/agents/custom-agent'
 import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
 import {
   AUTOCOMPACT_ENV_KEYS,
+  CLAUDE_SUBAGENT_ENV_KEYS,
   MODEL_GATEWAY_ENV_KEYS,
   claudeAutocompactFor,
+  claudeSubagentEnvFor,
   modelGatewayEnv,
   tmuxUpdateEnvironmentLine,
   type GatewayModel
@@ -1631,7 +1633,11 @@ export class PtyManager {
     )
     if (!wanted.length) return
     if (!this.updateEnvKeys) {
-      this.updateEnvKeys = new Set([...MODEL_GATEWAY_ENV_KEYS, ...AUTOCOMPACT_ENV_KEYS])
+      this.updateEnvKeys = new Set([
+        ...MODEL_GATEWAY_ENV_KEYS,
+        ...AUTOCOMPACT_ENV_KEYS,
+        ...CLAUDE_SUBAGENT_ENV_KEYS
+      ])
       try {
         const out = execFileSync(
           this.tmuxPath,
@@ -2843,9 +2849,18 @@ export class PtyManager {
           )
         : { modelId: undefined, env: {} }
     const autocompactEnv = autocompact.env
+    const subagentEnv =
+      !stripRe && options.agentId
+        ? claudeSubagentEnvFor(
+            options.agentId as AgentId,
+            gatewayModels,
+            this.getSettings().modelGatewayDefaultModel
+          )
+        : {}
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
       for (const [k, v] of Object.entries(autocompactEnv)) env[k] = v
+      for (const [k, v] of Object.entries(subagentEnv)) env[k] = v
       // Strip inherited provider vars so a vanilla session does not fall back to a LaunchAgent-set
       // ANTHROPIC_BASE_URL instead of the subscription. Local only — see the note above.
       if (stripRe) {
@@ -3027,6 +3042,7 @@ export class PtyManager {
       const remoteEnvPairs: Record<string, string> = {
         ...gatewayEnv,
         ...autocompactEnv,
+        ...subagentEnv,
         ...(projectEnv ?? {})
       }
       for (const kv of remoteCustomEnv.args) {
@@ -3048,7 +3064,11 @@ export class PtyManager {
           envFile,
           sessionEnvFileContent(remoteEnvPairs)
         )
-        const baked = new Set<string>([...MODEL_GATEWAY_ENV_KEYS, ...AUTOCOMPACT_ENV_KEYS])
+        const baked = new Set<string>([
+          ...MODEL_GATEWAY_ENV_KEYS,
+          ...AUTOCOMPACT_ENV_KEYS,
+          ...CLAUDE_SUBAGENT_ENV_KEYS
+        ])
         remoteSessionEnv = {
           file: envFile,
           extraKeys: Object.keys(remoteEnvPairs).filter((k) => !baked.has(k))
