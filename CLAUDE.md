@@ -1546,6 +1546,32 @@ else, and its context links must keep classifying across restarts).
   catalogue before the debounced replacement request; replacing the stored key explicitly clears
   it because the persisted secret sentinel itself does not change. Core accepts a discovery result
   into launch state only when it is the latest request and still matches the saved configuration.
+  **Claude subagents use the same gateway catalogue.** A gateway-backed claude-base session sets
+  `CLAUDE_CODE_SUBAGENT_MODEL` to the configured default when that id is listed; with no default
+  configured, the subagent route prefers the `reasoning` alias when the catalogue
+  lists it (the inference box's heavy-work route — an administrator-defined alias is ordinary
+  catalogue data, so this preference is deliberate, not discovery). The session also defaults
+  `CLAUDE_CODE_EFFORT_LEVEL` from the selected model's discovered `reasoning` metadata (Bifrost's
+  `{supported_efforts, default_effort}` block on `/v1/models`, parsed into `GatewayModel.reasoning`):
+  the route's own `default_effort` when reported, else its highest supported level, else
+  `xhigh` (`CLAUDE_SUBAGENT_EFFORT_FALLBACK`). Absent reasoning metadata is NOT evidence thinking is
+  unsupported — discovery omits the block on some served routes (e.g. GLM-5.3-Flash) — so the
+  fallback emits the level rather than omitting the variable; Claude clamps unknown levels itself,
+  and a route that rejects one errors noisily instead of silently un-thinking every subagent.
+  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` keeps explicit Agent-tool model choices (such as `sonnet`
+  and `haiku`) on the served route (Claude Code 2.1.251 changed precedence, 2.1.257 added the
+  force switch). This effort setting applies to both parent and children; project/custom-agent env
+  can override it, and local subscription launches strip all three, including inherited values.
+  **Launch records keep context meters truthful across model switches.** `agentModel` persists the
+  user's requested catalogue choice for later restarts, while `agentLaunchModel` and
+  `agentLaunchContextWindow` record the exact model id and discovered window during initial command
+  assembly and after an accepted relaunch. Context meters use that record for the label and
+  denominator while keeping the transcript's token count; this avoids showing a replayed pre-switch
+  model or window until the next assistant row arrives. Hand-launched and older sessions fall back
+  to transcript metadata, with `core/model-window.ts` consulting `PtyManager`'s current
+  scope-checked catalogue for discovered windows. Exact ids, optional `[1m]` spelling, and the
+  final provider path segment match; a known family window remains the floor, and a settings or
+  credential change immediately removes the old catalogue from consideration.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE`,

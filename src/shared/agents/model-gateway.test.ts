@@ -9,6 +9,7 @@ import {
   modelGatewayEnv,
   modelGatewayCredentialKind,
   modelGatewayRoutes,
+  modelContextWindow,
   modelsForAgent,
   parseGatewayModels,
   parseModelGatewayEnvReference,
@@ -513,5 +514,124 @@ describe('autocompact env keys lockstep', () => {
     for (const k of Object.keys(claudeAutocompactFor('claude', 'anthropic/claude-opus-5', models).env)) {
       expect(line).toContain(k)
     }
+  })
+})
+
+describe('Claude gateway subagent routing', () => {
+  const models = [
+    { id: 'vllm/zeta', contextWindow: 200_000 },
+    { id: 'anthropic/alpha' }
+  ]
+
+  it('prefers the configured default when the gateway lists it', () => {
+    expect(claudeSubagentModelFor(models, 'vllm/zeta')).toBe('vllm/zeta')
+  })
+
+  it('prefers the reasoning alias when no default is configured', () => {
+    const catalog = [...models, { id: 'reasoning' }]
+    expect(claudeSubagentModelFor(catalog)).toBe('reasoning')
+    // The configured default still beats the alias; a catalogue without it stays deterministic.
+    expect(claudeSubagentModelFor(catalog, 'vllm/zeta')).toBe('vllm/zeta')
+    expect(claudeSubagentModelFor(models)).toBe('anthropic/alpha')
+  })
+
+  it('falls back deterministically when the default is absent or unlisted', () => {
+    expect(claudeSubagentModelFor(models, 'missing')).toBe('anthropic/alpha')
+    expect(claudeSubagentModelFor([...models].reverse())).toBe('anthropic/alpha')
+  })
+
+  it('routes independently of context metadata and only for a Claude-base agent', () => {
+    expect(claudeSubagentEnvFor('claude', models)).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'anthropic/alpha',
+      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+      CLAUDE_CODE_EFFORT_LEVEL: CLAUDE_SUBAGENT_EFFORT_FALLBACK
+    })
+    for (const id of ['codex', 'copilot', 'custom:plain'] as const) {
+      expect(claudeSubagentEnvFor(id, models)).toEqual({})
+    }
+    expect(claudeSubagentModelFor([], 'vllm/zeta')).toBeUndefined()
+    expect(claudeSubagentEnvFor('claude', [], 'vllm/zeta')).toEqual({})
+  })
+
+  it('forces the served route for custom Claude agents too', () => {
+    setCustomAgentBaseResolver((id) => id === 'custom:proxy' ? 'claude' : undefined)
+    try {
+      expect(claudeSubagentEnvFor('custom:proxy', models, 'vllm/zeta')).toEqual({
+        CLAUDE_CODE_SUBAGENT_MODEL: 'vllm/zeta',
+        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+        CLAUDE_CODE_EFFORT_LEVEL: CLAUDE_SUBAGENT_EFFORT_FALLBACK
+      })
+    } finally {
+      setCustomAgentBaseResolver(null)
+    }
+  })
+
+  it('delivers every subagent control through the local and remote tmux environment', () => {
+    const keys = Object.keys(claudeSubagentEnvFor('claude', models))
+    const updateNames = tmuxUpdateEnvironmentLine().split('"')[1].split(' ')
+    for (const key of keys) expect(updateNames).toContain(key)
+  })
+})
+
+describe('gateway reasoning metadata', () => {
+  const parsed = parseGatewayModels({
+    data: [
+      { id: 'vllm/Qwen3.8-27B-FP8', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'], default_effort: 'xhigh' } },
+      { id: 'vllm/chat-fast', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'] } },
+      { id: 'vllm/GLM-5.3-Flash-FP8' },
+      { id: 'vllm/broken', reasoning: { supported_efforts: ['no spaces allowed', 42, null], default_effort: '' } },
+      { id: 'vllm/empty-efforts', reasoning: { supported_efforts: [] } },
+      { id: 'vllm/wrong-shape', reasoning: 'xhigh' }
+    ]
+  })
+  const byId = (id: string) => parsed.find((m) => m.id === id)
+
+  it('parses the Bifrost reasoning block into supported/default efforts', () => {
+    expect(byId('vllm/Qwen3.8-27B-FP8')?.reasoning).toEqual({
+      supportedEfforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh'
+    })
+    expect(byId('vllm/chat-fast')?.reasoning).toEqual({ supportedEfforts: ['low', 'medium', 'xhigh'] })
+  })
+
+  it('keeps models without usable reasoning metadata plain', () => {
+    for (const id of ['vllm/GLM-5.3-Flash-FP8', 'vllm/broken', 'vllm/empty-efforts', 'vllm/wrong-shape']) {
+      expect(byId(id)?.reasoning).toBeUndefined()
+    }
+  })
+
+  it('derives the effort from the selected model, preferring its own default', () => {
+    expect(claudeEffortFor(parsed, 'vllm/Qwen3.8-27B-FP8')).toBe('xhigh')
+    // No default reported ⇒ the highest supported level.
+    expect(claudeEffortFor(parsed, 'vllm/chat-fast')).toBe('xhigh')
+  })
+
+  it('falls back to the static default when the model is unknown or carries no metadata', () => {
+    for (const id of ['vllm/GLM-5.3-Flash-FP8', 'vllm/broken', 'vllm/empty-efforts', 'vllm/wrong-shape', 'vllm/missing']) {
+      expect(claudeEffortFor(parsed, id)).toBe(CLAUDE_SUBAGENT_EFFORT_FALLBACK)
+    }
+    expect(claudeEffortFor(parsed, undefined)).toBe(CLAUDE_SUBAGENT_EFFORT_FALLBACK)
+  })
+
+  it('matches the autocompact `[1m]` spelling', () => {
+    const with1m = parseGatewayModels({
+      data: [{ id: 'vllm/long', reasoning: { supported_efforts: ['low'], default_effort: 'low' } }]
+    })
+    expect(claudeEffortFor(with1m, 'vllm/long[1m]')).toBe('low')
+  })
+})
+
+describe('modelContextWindow', () => {
+  const models = [{ id: 'vllm/GLM-5.3', contextWindow: 400_000 }]
+
+  it('matches either plain or [1m]-suffixed spelling', () => {
+    expect(modelContextWindow('vllm/GLM-5.3', models)).toBe(400_000)
+    expect(modelContextWindow('vllm/GLM-5.3[1m]', models)).toBe(400_000)
+  })
+
+  it('returns undefined for an absent model or invalid window', () => {
+    expect(modelContextWindow(undefined, models)).toBeUndefined()
+    expect(modelContextWindow('other', models)).toBeUndefined()
+    expect(modelContextWindow('bad', [{ id: 'bad', contextWindow: Number.NaN }])).toBeUndefined()
   })
 })
