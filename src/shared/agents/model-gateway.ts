@@ -268,6 +268,11 @@ export const AUTOCOMPACT_ENV_KEYS = [
   'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'
 ] as const
 
+/** Claude Code routes its own subagents through this model. Keeping the key separate from the
+ *  autocompact keys makes routing independent of context-window metadata. */
+export const CLAUDE_CODE_SUBAGENT_MODEL_KEY = 'CLAUDE_CODE_SUBAGENT_MODEL'
+export const CLAUDE_SUBAGENT_ENV_KEYS = [CLAUDE_CODE_SUBAGENT_MODEL_KEY] as const
+
 /** tmux's own stock `update-environment` entries (tmux 3.4 defaults, measured via
  *  `show-options -g`). Assigning the option as a whole REPLACES the array, so the defaults must be
  *  restated or SSH agent forwarding et al. silently break. */
@@ -300,6 +305,7 @@ export function tmuxUpdateEnvironmentLine(extraNames: readonly string[] = []): s
       ...TMUX_STOCK_UPDATE_ENV,
       ...MODEL_GATEWAY_ENV_KEYS,
       ...AUTOCOMPACT_ENV_KEYS,
+      ...CLAUDE_SUBAGENT_ENV_KEYS,
       ...extraNames
     ])
   ]
@@ -467,4 +473,27 @@ export function claudeAutocompactFor(
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: AUTOCOMPACT_PCT_OVERRIDE
     }
   }
+}
+
+/** Choose only a model the current gateway catalogue says it serves. A configured default wins
+ *  when present; otherwise sort here so callers need not know how the catalogue was produced. */
+export function claudeSubagentModelFor(
+  models: readonly GatewayModel[],
+  defaultModel?: string
+): string | undefined {
+  const ids = [...new Set(modelsForAgent(models, 'claude').map((model) => model.id.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+  const preferred = defaultModel?.trim()
+  return preferred && ids.includes(preferred) ? preferred : ids[0]
+}
+
+/** Build Claude's gateway subagent routing independently from large-context launch handling. */
+export function claudeSubagentEnvFor(
+  agentId: AgentId,
+  models: readonly GatewayModel[],
+  defaultModel?: string
+): Record<string, string> {
+  if (capabilityAgentId(agentId) !== 'claude') return {}
+  const model = claudeSubagentModelFor(models, defaultModel)
+  return model ? { [CLAUDE_CODE_SUBAGENT_MODEL_KEY]: model } : {}
 }

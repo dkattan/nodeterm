@@ -11,6 +11,8 @@ import {
   resolveModelGatewayApiKey,
   withAgentModel,
   claudeAutocompactFor,
+  claudeSubagentEnvFor,
+  claudeSubagentModelFor,
   AUTOCOMPACT_THRESHOLD,
   AUTOCOMPACT_PCT_OVERRIDE,
   tmuxUpdateEnvironmentLine
@@ -416,5 +418,30 @@ describe('autocompact env keys lockstep', () => {
     for (const k of Object.keys(claudeAutocompactFor('claude', 'anthropic/claude-opus-5', models).env)) {
       expect(line).toContain(k)
     }
+  })
+})
+
+describe('Claude gateway subagent routing', () => {
+  const models = [
+    { id: 'vllm/zeta', contextWindow: 200_000 },
+    { id: 'anthropic/alpha' }
+  ]
+
+  it('prefers the configured default when the gateway lists it', () => {
+    expect(claudeSubagentModelFor(models, 'vllm/zeta')).toBe('vllm/zeta')
+  })
+
+  it('falls back deterministically when the default is absent or unlisted', () => {
+    expect(claudeSubagentModelFor(models, 'missing')).toBe('anthropic/alpha')
+    expect(claudeSubagentModelFor([...models].reverse())).toBe('anthropic/alpha')
+  })
+
+  it('routes independently of context metadata and only for a Claude-base agent', () => {
+    expect(claudeSubagentEnvFor('claude', models)).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'anthropic/alpha'
+    })
+    expect(claudeSubagentEnvFor('codex', models)).toEqual({})
+    expect(claudeSubagentModelFor([], 'vllm/zeta')).toBeUndefined()
+    expect(tmuxUpdateEnvironmentLine()).toContain('CLAUDE_CODE_SUBAGENT_MODEL')
   })
 })
