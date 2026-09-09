@@ -78,7 +78,7 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
   // hold whether the custom text input is open and what the user is mid-typing into it.
   const [customMode, setCustomMode] = useState(false)
   const [customPath, setCustomPath] = useState('')
-  const routes = modelGatewayRoutes(gateway.baseUrl)
+  const routes = modelGatewayRoutes(gateway.baseUrl, gateway.discoveryPath)
 
   const patchGateway = (patch: Partial<typeof gateway>): void => {
     const current = useSettings.getState().settings.modelGateway
@@ -143,7 +143,10 @@ export function ModelGatewaySection({ isActive }: { isActive: boolean }): React.
       const current = useSettings.getState().settings.modelGateway
       // Replacing a key leaves the settings sentinel unchanged, so Canvas's value-based effect has
       // no dependency change to observe. A first save does change it and gets the normal debounce.
-      if (replacingStoredKey && modelGatewayRoutes(current.baseUrl)) {
+      if (
+        replacingStoredKey &&
+        modelGatewayRoutes(current.baseUrl, current.discoveryPath)
+      ) {
         void discover({ ...current, apiKey: MODEL_GATEWAY_SECRET_REF })
       }
       setCredentialNotice('API key saved securely.')

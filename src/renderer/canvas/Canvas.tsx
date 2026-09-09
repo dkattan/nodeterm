@@ -1314,6 +1314,7 @@ export function Canvas() {
   }, [
     settings.modelGateway.baseUrl,
     settings.modelGateway.apiKey,
+    settings.modelGateway.discoveryPath,
     discoverModels,
     clearModels
   ])
