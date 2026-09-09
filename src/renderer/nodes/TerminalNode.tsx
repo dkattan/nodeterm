@@ -318,6 +318,7 @@ import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleLaunchCommand, assembleResumeCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
+import { useModelGateway } from '../state/modelGateway'
 import {
   ensureActivePermissionMode,
   claudeCliCapsNow,
@@ -4217,6 +4218,7 @@ export function TerminalNode({
           const customAgent = agentConfig(agentId)
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+          const models = useModelGateway.getState().models
           const { command: cmd } = assembleResumeCommand(
             {
               agentId,
@@ -4224,6 +4226,7 @@ export function TerminalNode({
               sessionId: resume.sessionId,
               permissionMode: mode,
               model: data.agentModel,
+              models,
               sharedIdentity: shared,
               // Which `--ask-for-approval` values the codex that will run this node actually has.
               // Same remoteness question `shared` just answered: an SSH node runs the HOST's codex,
@@ -4361,6 +4364,7 @@ export function TerminalNode({
                     sessionId: undefined,
                     permissionMode: mode,
                     model: data.agentModel,
+                          models,
                     sharedIdentity: shared,
                     approvalCaps: await ensureCodexLaunchCaps(
                 capabilityAgentId(agentId),
@@ -4698,6 +4702,7 @@ export function TerminalNode({
               target,
               getNode(id)?.data.agentModel as string | undefined
             )
+        const gatewayModels = useModelGateway.getState().models
         // A model switch must rebuild the terminal session: URL/key env was fixed when that shell
         // was spawned and may have been configured AFTER this node was created. Do not type the
         // harness's slash-exit command here — an agent composer can treat it as prompt text. Core
@@ -5023,6 +5028,7 @@ export function TerminalNode({
                 data.ssh || data.sshRemoteTmux || session.source === 'relay'
               ),
             sharedIdentity: false,
+            models: useModelGateway.getState().models,
             // The launch-command override lives on the user's own PATH (or is an absolute path),
             // not in a generated launcher dir, so it rides the wake too — project layer included.
             launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
