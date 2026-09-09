@@ -61,24 +61,29 @@ export interface DeliveryIo {
 }
 
 /** Deliver `cmd` + Enter, echo-verified with bounded retries. Returns a cancel function
- *  (call on node teardown). `onSettled` fires exactly once when the delivery is over — submitted
- *  (verified or fail-open) or cancelled — for callers that must know when the LINE has left the
- *  pane, not merely when it was started: the retries run for up to
+ *  (call on node teardown). `onSettled` fires exactly once when the delivery is over and reports
+ *  whether the final Enter write succeeded (`true`) or delivery was cancelled/a write failed
+ *  (`false`) — for callers that must know when the LINE has left the pane, not merely when it was
+ *  started: the retries run for up to
  *  DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS, and anything typed into the pane during that window
  *  lands inside the un-submitted line. */
-export function deliverCommand(io: DeliveryIo, cmd: string, onSettled?: () => void): () => void {
+export function deliverCommand(
+  io: DeliveryIo,
+  cmd: string,
+  onSettled?: (submitted: boolean) => void
+): () => void {
   let done = false
   let attempt = 0
   let echoed = ''
   let timer: ReturnType<typeof setTimeout> | undefined
   let unsub: (() => void) | undefined
 
-  const finish = (): void => {
+  const finish = (submitted = false): void => {
     if (done) return // a cancel after the submit must not re-announce the delivery
     done = true
     if (timer) clearTimeout(timer)
     unsub?.()
-    onSettled?.()
+    onSettled?.(submitted)
   }
   /**
    * Every write goes through here. `io.write` is unguarded all the way down to the relay client's
@@ -105,12 +110,25 @@ export function deliverCommand(io: DeliveryIo, cmd: string, onSettled?: () => vo
       return false
     }
   }
-  // Close the delivery BEFORE writing Enter: an io whose write echoes back synchronously (the
-  // in-place restart choreography feeds one) would otherwise re-enter the listener below while
-  // the tail still matches, and submit forever.
+  // Mark closed BEFORE writing Enter: an io whose write echoes back synchronously (the in-place
+  // restart choreography feeds one) would otherwise re-enter the listener below while the tail
+  // still matches, and submit forever. Announce success only AFTER that final write returns: the
+  // old ordering let a rejected Enter auto-dismiss a restart as successful.
   const submit = (): void => {
-    finish()
-    write('\r')
+    if (done) return
+    done = true
+    if (timer) clearTimeout(timer)
+    unsub?.()
+    let submitted = false
+    try {
+      io.write('\r')
+      submitted = true
+    } catch {
+      // The transport rejected Enter. Report the failed submission below.
+    }
+    // Deliberately outside the transport try/catch: a caller callback that throws must still be
+    // invoked exactly once, and its own exception keeps propagating to that caller.
+    onSettled?.(submitted)
   }
   const tryOnce = (): void => {
     if (done) return
@@ -139,5 +157,5 @@ export function deliverCommand(io: DeliveryIo, cmd: string, onSettled?: () => vo
     }
   })
   tryOnce()
-  return finish
+  return () => finish(false)
 }

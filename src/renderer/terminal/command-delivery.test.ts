@@ -225,11 +225,32 @@ describe('deliverCommand', () => {
 
   it('does not let a throwing Enter escape into the echo listener', () => {
     const f = throwingIo((d) => d === '\r')
-    let ends = 0
-    deliverCommand(f.io, CMD, () => (ends += 1))
+    const verdicts: boolean[] = []
+    deliverCommand(f.io, CMD, (submitted) => verdicts.push(submitted))
     expect(() => f.emit(CMD)).not.toThrow() // the throw would surface inside the PTY data callback
-    expect(ends).toBe(1) // the line was written and verified; only Enter was lost
+    expect(verdicts).toEqual([false]) // verified text is not a submission when Enter was lost
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('reports true only after the final Enter write succeeds', () => {
+    const f = fakeIo()
+    const verdicts: boolean[] = []
+    deliverCommand(f.io, CMD, (submitted) => verdicts.push(submitted))
+    expect(verdicts).toEqual([])
+    f.emit(CMD)
+    expect(verdicts).toEqual([true])
+    expect(f.writes.at(-1)).toBe('\r')
+  })
+
+  it('invokes a throwing settlement callback exactly once', () => {
+    const f = fakeIo()
+    const settled = vi.fn(() => {
+      throw new Error('consumer failed')
+    })
+    deliverCommand(f.io, CMD, settled)
+    expect(() => f.emit(CMD)).toThrow('consumer failed')
+    expect(settled).toHaveBeenCalledOnce()
+    expect(settled).toHaveBeenCalledWith(true)
   })
 
   it('ignores echo arriving after submit (no double Enter)', () => {
