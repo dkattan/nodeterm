@@ -13,7 +13,7 @@ import {
   setDefaultAgent
 } from '../../../state/agentAvailability'
 import { ensureClaudeCliCaps } from '../../../state/permissionMode'
-import type { ClaudeCliCaps } from '@shared/types'
+import type { AgentLaunchMode, ClaudeCliCaps } from '@shared/types'
 import {
   AGENT_CONFIG,
   ALL_PERMISSION_MODES,
@@ -68,13 +68,16 @@ const ROWS = {
     ]
   },
   vanillaLaunch: {
-    title: 'Launch on subscription',
+    title: 'Launch mode',
     keywords: [
+      'launch mode',
       'subscription',
       'vanilla',
       'gateway',
+      'gateway model',
       'provider',
       'default',
+      'default model',
       'anthropic',
       'openai',
       'copilot',
@@ -381,14 +384,24 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       </SearchableRow>
       <SearchableRow {...ROWS.vanillaLaunch}>
         <FieldRow
-          label="Launch on subscription"
-          description="Spawn every fresh agent session with gateway and inherited provider env stripped, so it runs against its OWN default provider — Claude's subscription, Copilot's GitHub routing — instead of a configured model gateway or a LaunchAgent-set override. The per-node “Restart on subscription” action does the same for one node; this is its global counterpart. The managed-account config dir is kept, so account isolation survives. Off by default — it changes which provider every agent node uses."
+          label="Launch mode"
+          description="The default provider behavior for a fresh canvas agent session. “Gateway (CLI default)” injects the model gateway but lets the CLI pick its own default model. “Gateway (default model)” additionally launches on the default model chosen in Settings → Model gateway. “Subscription” strips the gateway + inherited provider env so the agent runs against its OWN provider (Claude’s subscription, Copilot’s GitHub routing) — the global counterpart of the per-node “Restart on subscription” action. The managed-account config dir is kept, so account isolation survives."
           control={
-            <Switch
-              checked={settings.vanillaLaunchDefault}
-              ariaLabel="Launch on subscription by default"
-              onChange={(on) => update({ vanillaLaunchDefault: on })}
-            />
+            <Select
+              aria-label="Agent launch mode"
+              value={settings.agentLaunchMode}
+              onChange={(e) =>
+                update({ agentLaunchMode: e.target.value as AgentLaunchMode })
+              }
+            >
+              <option value="gateway">Gateway (CLI default model)</option>
+              <option value="gateway-model">
+                {settings.modelGatewayDefaultModel
+                  ? `Gateway (default model: ${settings.modelGatewayDefaultModel})`
+                  : 'Gateway (default model — none configured)'}
+              </option>
+              <option value="subscription">Subscription (own provider credentials)</option>
+            </Select>
           }
         />
       </SearchableRow>

@@ -19,6 +19,25 @@ import type {
   ModelGatewaySettings
 } from './agents/model-gateway'
 
+/**
+ * The default provider behavior for a FRESH agent spawn — the three-way successor to the old
+ * `vanillaLaunchDefault` boolean. Read by `pty-manager`'s spawn-site strip gate and by the
+ * renderer's new-node creation (`addAgentNode`):
+ *  - `'gateway'`        — inject the model gateway env; the agent uses the CLI's OWN default model
+ *                         (no `--model`). Today's behavior for a gateway node with no per-node model.
+ *  - `'gateway-model'`  — inject the gateway env AND launch with the configured default gateway
+ *                         model (`settings.modelGatewayDefaultModel`), so a new canvas session
+ *                         opens on a chosen model without a per-node "Switch model" click.
+ *  - `'subscription'`   — strip the gateway + inherited provider env so the agent runs against its
+ *                         OWN default provider (Claude's subscription, Copilot's GitHub routing).
+ *                         The former `vanillaLaunchDefault: true`. Wins even when a default model is
+ *                         set (vanilla = no gateway at all, so the gateway model is moot).
+ *
+ * `vanillaLaunchDefault` is kept for one release as a migration MIRROR (an older build still honors
+ * the choice); `agentLaunchMode === 'subscription'` ⇒ `vanillaLaunchDefault = true`, else `false`.
+ */
+export type AgentLaunchMode = 'gateway' | 'gateway-model' | 'subscription'
+
 /** Profile-switch replacement intent. The trusted core validates and re-resolves it before teardown. */
 export interface PtyRecycleTarget {
   profileId: string
@@ -1524,6 +1543,10 @@ export interface Settings {
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
   modelGateway: ModelGatewaySettings
+  /** The default gateway model id (from discovery) applied to a fresh canvas agent spawn when
+   *  `agentLaunchMode === 'gateway-model'`. A separate field from `modelGateway` (it is NOT a
+   *  credential). Absent/empty = no default ⇒ `'gateway-model'` behaves like `'gateway'`. */
+  modelGatewayDefaultModel?: string
   /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
    *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
    *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
@@ -1576,6 +1599,9 @@ export interface Settings {
    *  `CLAUDE_CONFIG_DIR` (account isolation survives). See `vanillaEnvStripPattern`.
    */
   vanillaLaunchDefault: boolean
+  /** The default provider behavior for a fresh agent spawn (the three-way successor to
+   *  `vanillaLaunchDefault`). See `AgentLaunchMode`. Default `'gateway'` = today's behavior. */
+  agentLaunchMode: AgentLaunchMode
   /** "Eco": exit the agent CLI of a session that has been idle AND offscreen for
    *  `agentHibernationIdleMinutes`, reclaiming its RAM; the conversation is resumed automatically
    *  when the node is viewed again. Default OFF — opt-in, because it stops a real process.
@@ -1743,6 +1769,9 @@ export const DEFAULT_SETTINGS: Settings = {
   soundVolume: 0.5,
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
+  // No default gateway model until the user picks one in Settings → Model gateway. Absent ⇒
+  // `'gateway-model'` behaves like `'gateway'` (no --model on a fresh spawn).
+  modelGatewayDefaultModel: undefined,
   agentLaunchCommands: {},
   claudeAccounts: [],
   codexAccounts: [],
@@ -1765,6 +1794,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Opt-in: strips the gateway/inherited provider env on every fresh launch so agents run against
   // their own default provider. Off by default — changes which provider every agent node uses.
   vanillaLaunchDefault: false,
+  // The three-way successor to the boolean above. `'gateway'` = inject gateway env, CLI default
+  // model (today's behavior). `vanillaLaunchDefault` is now its migration mirror.
+  agentLaunchMode: 'gateway',
   // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
   // is deliberately long — shorter windows exit sessions the user is between turns on.
   agentHibernationEnabled: false,

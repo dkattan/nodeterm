@@ -2768,14 +2768,20 @@ export class PtyManager {
     // historical Claude fallback does not apply here: gateway access is an explicit agent
     // capability, not a terminal default.
     //
-    // "Restart on subscription" / `vanillaLaunchDefault`: strip the gateway + inherited provider env
+    // "Restart on subscription" / launch mode: strip the gateway + inherited provider env
     // so the agent runs against its OWN default provider (Claude's subscription, Copilot's GitHub
-    // routing). `vanillaEnvStripPattern` resolves through the base harness; null ⇒ the agent has no
-    // strip set ⇒ no-op (gemini/grok/opencode are left alone). `buildPtyEnv` runs only in `spawnNew`
-    // (a fresh session), never on a warm reattach, so toggling the setting never strips an
-    // already-running session — only the next fresh launch.
+    // routing). `vanillaEnvStripPattern` resolves through the base harness (`capabilityAgentId` of
+    // the agent id, so a custom agent inheriting a builtin gets the builtin's strip set); null ⇒ the
+    // agent has no strip set ⇒ no-op (gemini/grok/opencode are left alone). `buildPtyEnv` runs only
+    // in `spawnNew` (a fresh session), never on a warm reattach, so toggling the setting never strips
+    // an already-running session — only the next fresh launch.
+    // The launch mode is a tri-state (`agentLaunchMode`); a per-node one-shot `clearEnv` (the
+    // "Restart on subscription" action) forces the subscription/vanilla path for THIS spawn. The
+    // old boolean `vanillaLaunchDefault` is now a migration mirror kept in lockstep with the mode
+    // by the settings read/write paths, so reading the mode here is sufficient.
+    const launchMode = options.clearEnv ? 'subscription' : this.getSettings().agentLaunchMode
     const stripRe =
-      options.clearEnv || this.getSettings().vanillaLaunchDefault
+      launchMode === 'subscription'
         ? options.agentId
           ? vanillaEnvStripPattern(options.agentId)
           : null

@@ -407,6 +407,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       const m = new PtyManager()
       m.init(() => ({
         ...DEFAULT_SETTINGS,
+        agentLaunchMode: mode.vanillaLaunchDefault ? 'subscription' : 'gateway',
         vanillaLaunchDefault: mode.vanillaLaunchDefault,
         modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
       }))
@@ -528,7 +529,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   // recycle: read LIVE at spawn, so a fresh launch strips the gateway + inherited provider env
   // WITHOUT a per-node flag (and survives a reboot, since the setting is the source of truth, not
   // a one-shot data field that is cleared after its single use).
-  it('vanillaLaunchDefault strips the gateway + inherited env on a fresh spawn (no per-node clearEnv)', async () => {
+  it('subscription launch mode strips the gateway + inherited env on a fresh spawn', async () => {
     const inheritedBase = process.env.ANTHROPIC_BASE_URL
     const inheritedDir = process.env.CLAUDE_CONFIG_DIR
     process.env.ANTHROPIC_BASE_URL = 'https://launchagent-gateway.example.test'
@@ -538,6 +539,9 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       const m = new PtyManager()
       m.init(() => ({
         ...DEFAULT_SETTINGS,
+        // The three-way successor to the boolean. (`vanillaLaunchDefault` is now a mirror kept in
+        // lockstep by the settings read path; tests that build settings inline must set the mode.)
+        agentLaunchMode: 'subscription',
         vanillaLaunchDefault: true,
         modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
       }))
@@ -565,11 +569,12 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     }
   })
 
-  it('vanillaLaunchDefault is a no-op for an agent with no strip pattern, and off keeps the gateway', async () => {
+  it('subscription is a no-op without a strip pattern, while both gateway modes keep the gateway', async () => {
     const { PtyManager } = await import('./pty-manager')
     const m = new PtyManager()
     m.init(() => ({
       ...DEFAULT_SETTINGS,
+      agentLaunchMode: 'subscription',
       vanillaLaunchDefault: true,
       modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
     }))
@@ -587,6 +592,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     const m2 = new PtyManager()
     m2.init(() => ({
       ...DEFAULT_SETTINGS,
+      agentLaunchMode: 'gateway',
       vanillaLaunchDefault: false,
       modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
     }))
@@ -594,6 +600,18 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     await create(80, 24, 'gateway-claude-default-off', { agentId: 'claude' })
     expect(spawnArgs[1].env.ANTHROPIC_BASE_URL).toBe('https://bifrost.example.test/anthropic')
     expect(spawnArgs[1].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-gateway')
+
+    // Gateway (default model) changes the renderer's launch command, not PTY credential injection.
+    const m3 = new PtyManager()
+    m3.init(() => ({
+      ...DEFAULT_SETTINGS,
+      agentLaunchMode: 'gateway-model',
+      modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
+    }))
+    m3.registerIpc()
+    await create(80, 24, 'gateway-claude-default-model', { agentId: 'claude' })
+    expect(spawnArgs[2].env.ANTHROPIC_BASE_URL).toBe('https://bifrost.example.test/anthropic')
+    expect(spawnArgs[2].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-gateway')
   })
 
   // ── `fresh` drives scrollback replay + agent resume: it must still be computed from tmux ──

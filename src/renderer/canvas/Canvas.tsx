@@ -4677,6 +4677,17 @@ export function Canvas() {
         `[nodeterm] node-create agent=${agentId} project=${targetProjectId} group=${groupId ?? '-'} cwd=${cwd ?? '-'}`
       )
       setNodes((ns) => {
+        // The default gateway model applies ONLY when the launch mode asks for it
+        // (`agentLaunchMode === 'gateway-model'`). 'gateway' launches with the CLI's own default
+        // model, and 'subscription' strips the gateway entirely so its model is moot. Gated on
+        // `canSwitchModel` (base-resolved) so a non-capable agent is left model-less.
+        const settings = useSettings.getState().settings
+        const model =
+          settings.agentLaunchMode === 'gateway-model' &&
+          settings.modelGatewayDefaultModel &&
+          canSwitchModel(agentId)
+            ? settings.modelGatewayDefaultModel
+            : undefined
         const node = createAgentNode(
           agentId,
           ns.length,
@@ -4688,7 +4699,8 @@ export function Canvas() {
           activePermissionMode(agentId),
           // Same funnel as the account above: the active project owns the node, so its own
           // `.nodeterm/settings.json` launch command layers over the global one.
-          targetProjectId
+          targetProjectId,
+          model
         )
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
