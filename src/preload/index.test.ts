@@ -51,6 +51,11 @@ describe('preload sshProject passphrase wiring', () => {
     expect(h.invoke).toHaveBeenCalledWith(IPC.ptyLaunchHeadless, req)
   })
 
+  it('routes environment inspection through request IPC', async () => {
+    await api.pty.envInfo('node-1')
+    expect(h.invoke).toHaveBeenCalledWith(IPC.ptyEnvInfo, 'node-1')
+  })
+
   it('exposes GitHub issue data and host-control namespaces on their exact channels', async () => {
     await api.githubIssues.query({ projectId: 'p1', columnId: null, pageSize: 50 })
     await api.githubControl.saveToken('write-only-secret')

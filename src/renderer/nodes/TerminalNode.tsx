@@ -6527,7 +6527,8 @@ export function TerminalNode({
             nodeModel={data.agentLaunchModel as string | undefined}
             nodeContextWindow={data.agentLaunchContextWindow as number | undefined}
           />
-        )}        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
+        )}
+        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
         {/* This terminal is broadcast by a live link — never hideable (live-link.guard.test.ts).
             Only through the LOCAL session: a relay tab's node with the same id is not ours (R57). */}

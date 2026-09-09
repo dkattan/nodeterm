@@ -1232,6 +1232,20 @@ export interface AgentProcessProof {
   agentPid?: number
 }
 
+/** A session environment entry after core has irreversibly masked credential-shaped values. */
+export interface PtyEnvVar {
+  key: string
+  value: string
+  secret?: boolean
+  /** False means tmux records this variable as removed from the session environment. */
+  set?: boolean
+}
+
+export interface PtyEnvInfo {
+  source: 'spawn' | 'tmux' | 'unavailable'
+  vars: PtyEnvVar[]
+}
+
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly
    *  created (cold start) vs reattached to a still-running tmux session (warm). */
@@ -1333,6 +1347,8 @@ export interface PtyApi {
    *  it. `null` is "could not read", never evidence that the pane is free (see `isAgentPane`'s
    *  three-valued verdict, which is what consumers should decide on). */
   paneOwner(persistKey: string): Promise<PaneOwner | null>
+  /** Read this session's environment with secrets masked in core. */
+  envInfo(persistKey: string): Promise<PtyEnvInfo>
   /** Terminate the exact argv-verified agent process group without killing the pane shell. */
   terminateForeground(
     persistKey: string,
