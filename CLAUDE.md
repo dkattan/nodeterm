@@ -1373,13 +1373,28 @@ else, and its context links must keep classifying across restarts).
   user's requested catalogue choice for later restarts, while `agentLaunchModel` and
   `agentLaunchContextWindow` record the exact model id and discovered window during initial command
   assembly and after an accepted relaunch. Context meters use that record for the label and
-  denominator while keeping the
-  transcript's token count; this avoids showing a replayed pre-switch model or window until the next
+  denominator while keeping the transcript's token count; this avoids showing a replayed pre-switch
+  model or window until the next
   assistant row arrives. Hand-launched and older sessions fall back to transcript metadata, with
   `core/model-window.ts` consulting `PtyManager`'s current scope-checked catalogue for discovered
   windows. Exact ids, optional `[1m]` spelling, and the final provider path segment match; a known
   family window remains the floor, and a settings or credential change immediately removes the old
   catalogue from consideration.
+  **Grouped gateway recovery.** A current non-empty catalogue can raise one dialog for idle,
+  resumable local sessions whose launched model disappeared, whose reported window changed, or
+  whose exact launch id would now assemble with different context settings. Candidate gates run for
+  both the active canvas and other open projects; legacy nodes retain a per-session first-observation
+  window ledger. Settings and boot discovery stay in the debounced prime effect. Window focus starts
+  exactly one refresh with the then-current settings, and only the current request's monotonic
+  `discoveryAt` completion triggers evaluation. Ready-empty, loading, and error catalogues cannot
+  judge and never start a recursive request. The dialog dismisses on confirmation and a persistent
+  strip shows each serialized restart as pending, running, successful, or failed. Failed rows keep
+  their refusal or verification reason, navigate to the session, and remain retryable until the user
+  retries or spends the ask. A `restarted` lifecycle result is successful only when the actual
+  `agentLaunchModel` and `agentLaunchContextWindow` written by TerminalNode satisfy the current
+  trigger and current ready catalogue. An uncured restart remains failed and unspent; Canvas never
+  overwrites that launch record with an expected value. Only a non-empty all-success batch
+  auto-dismisses, and its timer is scoped to that batch generation.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
