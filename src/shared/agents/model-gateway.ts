@@ -78,9 +78,10 @@ export interface GatewayModel {
   /** Maximum output/completion tokens the model may produce, when reported. Retained as catalogue
    *  metadata for consumers; absent stays absent, never guessed. */
   maxOutputTokens?: number
-  /** Bifrost's reasoning block on `/v1/models` (`{supported_efforts, default_effort}`), parsed.
-   *  Absent is NOT evidence thinking is unsupported — discovery omits the block on some served
-   *  routes — so consumers emit the fallback level rather than omitting the variable. */
+  /** Thinking-level metadata the gateway reports for the route (Bifrost's `reasoning` block on
+   *  `/v1/models`). `supportedEfforts` is the ordered list the route accepts and `defaultEffort`
+   *  its own preference; either may be absent, and a model with no reasoning metadata is NOT
+   *  evidence it lacks thinking — consumers must fall back rather than infer a capability. */
   reasoning?: { supportedEfforts: readonly string[]; defaultEffort?: string }
 }
 
@@ -173,7 +174,8 @@ function coerceTokenLimit(value: unknown): number | undefined {
   return n
 }
 
-/** Accept a well-formed effort token (no spaces/punctuation); anything else is absent. */
+/** Normalize one thinking-level word for comparison. Unknown shapes degrade to nothing: the
+ *  consumer falls back to its own default rather than sending an effort a route may reject. */
 function coerceEffortLevel(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const effort = value.trim().toLowerCase()
@@ -350,6 +352,11 @@ export const CLAUDE_SUBAGENT_ENV_KEYS = [
   'CLAUDE_CODE_SUBAGENT_MODEL_FORCE',
   'CLAUDE_CODE_EFFORT_LEVEL'
 ] as const
+
+/** The effort level requested when a model carries no discovered reasoning metadata. Kept as a
+ *  named constant because `claudeEffortFor`'s fallback and every test pinning the fallback must
+ *  not drift apart. */
+export const CLAUDE_SUBAGENT_EFFORT_FALLBACK = 'xhigh'
 
 /** tmux's own stock `update-environment` entries (tmux 3.4 defaults, measured via
  *  `show-options -g`). Assigning the option as a whole REPLACES the array, so the defaults must be
@@ -590,10 +597,6 @@ export function claudeSubagentModelFor(
   if (ids.includes(CLAUDE_SUBAGENT_PREFERRED_ALIAS)) return CLAUDE_SUBAGENT_PREFERRED_ALIAS
   return ids[0]
 }
-
-/** The effort level requested when a discovered route states neither a default nor a supported
- *  list (or lists nothing usable). Claude clamps unknown levels itself. */
-export const CLAUDE_SUBAGENT_EFFORT_FALLBACK = 'xhigh'
 
 /** The highest effort a route accepts — thinking scales with capability, and the list order carries
  *  no ranking of its own. */
