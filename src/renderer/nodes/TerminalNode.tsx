@@ -201,6 +201,7 @@ import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleLaunchCommand, assembleResumeCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
+import { useModelGateway } from '../state/modelGateway'
 import {
   ensureActivePermissionMode,
   claudeCliCapsNow,
@@ -3476,6 +3477,7 @@ export function TerminalNode({
           const customAgent = agentConfig(agentId)
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+          const models = useModelGateway.getState().models
           const launchCmdOverride = agentLaunchOverride(agentId, ownerProjectId)
           const launchEnv = agentEnvSnapshot()
           let cmd: string | undefined
@@ -3494,6 +3496,7 @@ export function TerminalNode({
                 sessionId: hookSessionId,
                 permissionMode: mode,
                 model: data.agentModel,
+                models,
                 sharedIdentity: shared,
                 launchCmdOverride
               },
@@ -3522,6 +3525,7 @@ export function TerminalNode({
                 sessionIdFlagSupported,
                 sharedIdentity: shared,
                 model: data.agentModel,
+                models,
                 launchCmdOverride
               },
               launchEnv
@@ -3881,6 +3885,7 @@ export function TerminalNode({
               target,
               getNode(id)?.data.agentModel as string | undefined
             )
+        const gatewayModels = useModelGateway.getState().models
         // A model switch must rebuild the terminal session: URL/key env was fixed when that shell
         // was spawned and may have been configured AFTER this node was created. Do not type the
         // harness's slash-exit command here — an agent composer can treat it as prompt text. Core
@@ -3969,6 +3974,7 @@ export function TerminalNode({
                 sessionId: agentSessionId,
                 permissionMode: await ensureActivePermissionMode(target),
                 model: selectedModel ?? undefined,
+                models: gatewayModels,
                 launchCmdOverride: agentLaunchOverride(target, ownerProjectId)
               },
               launchEnv
@@ -3981,6 +3987,7 @@ export function TerminalNode({
                 sessionId: sessionIdFlagSupported ? agentSessionId : undefined,
                 sessionIdFlagSupported,
                 model: selectedModel ?? undefined,
+                models: gatewayModels,
                 launchCmdOverride: agentLaunchOverride(target, ownerProjectId)
               },
               launchEnv
@@ -4158,6 +4165,7 @@ export function TerminalNode({
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
             sharedIdentity: false,
+            models: useModelGateway.getState().models,
             // The launch-command override lives on the user's own PATH (or is an absolute path),
             // not in a generated launcher dir, so it rides the wake too — project layer included.
             launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
