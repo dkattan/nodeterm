@@ -3632,6 +3632,7 @@ export function TerminalNode({
            * minted one on the node), so the next cold restore does not replay it.
            */
           const watchResumeMiss = (deadId: string): void => {
+            if (life.dead) return
             let fired = false
             let seen = ''
             // `unsub` is assigned on the line after the timer is armed, and `stop` is pushed to
@@ -3682,8 +3683,12 @@ export function TerminalNode({
                   reportThisRespawn({ ok: false, detail: 'the missing-session fallback could not build a launch command' })
                   return
                 }
-                useAgentStatus.getState().setSessionId(id, undefined)
-                if (data.agentSessionId) updateNodeData(id, { agentSessionId: undefined })
+                if (useAgentStatus.getState().byId[id]?.sessionId === deadId) {
+                  useAgentStatus.getState().setSessionId(id, undefined)
+                }
+                if (getNode(id)?.data.agentSessionId === deadId) {
+                  updateNodeData(id, { agentSessionId: undefined })
+                }
                 launchAndVerify(fresh)
               })()
             })
