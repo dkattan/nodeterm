@@ -21,6 +21,7 @@ import {
   capabilityAgentId,
   mintsSessionId,
   resumeCommandWith,
+  vanillaEnvStripPattern,
   withSessionId,
   type AgentId,
   type AgentPermissionMode
@@ -94,6 +95,9 @@ export interface ResumeInputs {
   permissionMode?: AgentPermissionMode
   /** Per-node model override, applied through the effective base harness. */
   model?: string
+  /** Resume on the agent's own provider/default model after stripping gateway env. Codex also
+   * needs an explicit provider override: omitting --model restores the thread's saved model. */
+  clearEnv?: boolean
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher on resume? Same
    *  semantics as `LaunchInputs.sharedIdentity`. */
   sharedIdentity?: boolean
