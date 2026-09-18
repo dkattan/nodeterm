@@ -277,6 +277,8 @@ export function assembleResumeCommand(
   // the session launched with. (The vanilla/subscription strip is the SPAWN env's job since #380 —
   // the resume command itself is model-shaped only.)
   const modelId = claudeAutocompactFor(capId, inputs.model, inputs.models ?? []).modelId
+  const subscription = inputs.clearEnv === true && !!vanillaEnvStripPattern(capId)
+  const codexSubscription = subscription && capId === 'codex'
 
   // A per-builtin launch-command override wins over the program and the launcher (same rule as the
   // fresh-launch path), so a cold-restore / restart resumes through the same wrapper.
@@ -286,7 +288,7 @@ export function assembleResumeCommand(
   // its managed launcher so the resumed session re-claims its own thread. Skipped for an override.
   const program = overrideCmd
     ? launchCmd
-    : agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)
+    : agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity && !codexSubscription)
   const { fragment: argsFragment, missing: m2 } = expandedArgs(inputs.customAgent?.args ?? '', env)
   const baseCmd = argsFragment ? `${program} ${argsFragment}` : program
 
@@ -295,10 +297,15 @@ export function assembleResumeCommand(
   const withMode = inputs.permissionMode
     ? withPermissionMode(base, capId, inputs.permissionMode, inputs.approvalCaps ?? {})
     : base
-  const command = withCodexNoDaemon(
-    withAgentModel(withMode, capId, modelId),
-    capId,
-    inputs.approvalCaps ?? {}
-  )
+  const withModel = withAgentModel(withMode, capId, subscription ? undefined : modelId)
+  // Codex resumes the model saved with the conversation unless a launch setting explicitly
+  // overrides it. Selecting its built-in provider reloads the configured/default model too;
+  // there is no hard-coded model or edit to the user's config/auth files. Use a plain client for
+  // this restart: a shared app-server can retain a loaded thread and ignore resume overrides —
+  // so the subscription branch takes NO withCodexNoDaemon daemon wrapper (it wants the plain
+  // client), and the ordinary path keeps main's wrapper.
+  const command = codexSubscription
+    ? `${withModel} -c 'model_provider="openai"'`
+    : withCodexNoDaemon(withModel, capId, inputs.approvalCaps ?? {})
   return { command, missingEnv: [...m1, ...m2] }
 }

@@ -3573,6 +3573,12 @@ export function TerminalNode({
         remote: sshRemoteTmux,
         respawnNonce: typeof data.respawnNonce === 'number' ? data.respawnNonce : 0
       })
+      // "Restart on subscription": the spawn strips gateway/provider env when the node asked for
+      // a vanilla restart OR the launch mode is subscription. Cleared post-spawn (one-shot) so an
+      // ordinary Restart re-applies the gateway.
+      const resumeOnSubscription = !!(agentId && vanillaEnvStripPattern(agentId)) && (
+        data.clearEnv === true || useSettings.getState().settings.agentLaunchMode === 'subscription'
+      )
       transport
         .create({
           cols: term.cols,
@@ -3594,7 +3600,7 @@ export function TerminalNode({
           agentModel: data.agentModel,
           // "Restart on subscription": ride the spawn's env-strip path. Cleared below once the
           // spawn resolves so an ordinary Restart re-applies the gateway (one-shot).
-          clearEnv: data.clearEnv === true,
+          clearEnv: resumeOnSubscription,
           accountId: data.accountId,
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
@@ -4232,6 +4238,7 @@ export function TerminalNode({
               permissionMode: mode,
               model: data.agentModel,
               models,
+              clearEnv: resumeOnSubscription,
               sharedIdentity: shared,
               // Which `--ask-for-approval` values the codex that will run this node actually has.
               // Same remoteness question `shared` just answered: an SSH node runs the HOST's codex,
@@ -4373,7 +4380,8 @@ export function TerminalNode({
                     sessionId: undefined,
                     permissionMode: mode,
                     model: data.agentModel,
-                          models,
+                    models,
+                    clearEnv: resumeOnSubscription,
                     sharedIdentity: shared,
                     approvalCaps: await ensureCodexLaunchCaps(
                 capabilityAgentId(agentId),
@@ -4609,7 +4617,7 @@ export function TerminalNode({
         }
         // "Restart on subscription": recycle the session VANILLA — strip the gateway + inherited
         // provider env so the agent falls back to its OWN default provider (Claude's subscription,
-        // Copilot's GitHub routing). No model change, no agent change: same agent, same
+        // Copilot's GitHub routing). Reset the gateway model; keep the same agent and
         // conversation, resumed by the cold-restore path once the fresh shell is up. It recycles
         // (not in-place resume) for the same reason a model switch does — tmux env changes do not
         // retroactively change an existing shell, so the gateway vars baked into the live session
