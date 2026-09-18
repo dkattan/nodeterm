@@ -447,7 +447,7 @@ export class GitService {
   async proposeBranch(cwd: string, child: string): Promise<GitResult> {
     const c = child.trim()
     if (!isValidGitRef(c)) return { ok: false, message: 'Invalid branch name.' }
-    if (!GH_PATH) return { ok: false, message: 'GitHub CLI (gh) not found.' }
+    if (!ghRunnable()) return { ok: false, message: 'GitHub CLI (gh) not found.' }
     const key = branchParentConfigKey(c)
     if (!key) return { ok: false, message: 'Invalid branch name.' }
     const parentR = await git(cwd, ['config', '--get', key])
@@ -467,9 +467,13 @@ export class GitService {
     try {
       // --head names the source branch; --base the parent it stacks onto. The PR body notes the
       // stack relationship so a reviewer sees the dependency without leaving the PR.
+      const invocation = ghInvocation([
+        'pr', 'create', '--base', parent, '--head', c, '--title', c, '--body', `Stacked on #${parent}.`
+      ])
+      if (!invocation) return { ok: false, message: 'GitHub CLI (gh) not found.' }
       await run(
-        GH_PATH,
-        ['pr', 'create', '--base', parent, '--head', c, '--title', c, '--body', `Stacked on #${parent}.`],
+        invocation.executable,
+        invocation.args,
         { cwd, env, maxBuffer: 10 * 1024 * 1024 }
       )
       return { ok: true, message: `Opened PR ${c} → ${parent}.` }

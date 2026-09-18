@@ -138,6 +138,9 @@ describe('grok mints on ITS OWN probe', () => {
     const n = createAgentNode('grok', 0)
     expect(n.data.agentSessionId).toBeUndefined()
     expect(n.data.initialCommand).not.toContain('--session-id')
+  })
+})
+
 describe('agentBaseId survives custom-agent settings changes', () => {
   afterEach(() => useSettings.setState({ settings: DEFAULT_SETTINGS }))
 

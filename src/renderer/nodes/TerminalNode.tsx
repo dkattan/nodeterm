@@ -5880,7 +5880,7 @@ export function TerminalNode({
                 // `CLAUDE_CONFIG_DIR=~/.claude-2` reads ITS transcript instead of an empty
                 // system-root one. Spawn/env identity is unaffected — that stays creation-time.
                 accountId={accountForReads}
-                agentId={agentId}
+                agentId={agentHarnessId}
               />
             </Suspense>
           ) : (

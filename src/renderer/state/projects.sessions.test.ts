@@ -184,11 +184,17 @@ describe('reorderNode', () => {
 })
 
 describe('link substrate persistence (context + lineage)', () => {
-  // Context links (formerly `bridges`) and lineage ropes (formerly `ropes`) now persist as ONE
-  // unified `Link[]` discriminated by `kind`. Committed with the canvas and carried into the
-  // workspace written to disk.
-  it('commitCanvas stores links and toWorkspace carries them', () => {
-    const links: Link[] = [
+  // Context links (formerly `bridges`) and lineage ropes (formerly `ropes`) persist as ONE unified
+  // `Link[]` discriminated by `kind`. The canvas commits them as its two edge arrays (the 5-arg
+  // form — Canvas never learns the Link shape); the store is the ONE conversion site.
+  it('commitCanvas stores bridges+ropes as links and toWorkspace carries them', () => {
+    const bridges = [{ id: 'bridge-n1-n2', source: 'n1', target: 'n2' }]
+    const ropes = [{ id: 'ctrl-n1-n2', source: 'n1', target: 'n2' }]
+    useProjects
+      .getState()
+      .commitCanvas('p1', [mkNode('n1')], { x: 0, y: 0, zoom: 1 }, bridges, ropes)
+    const p = useProjects.getState().projects[0]
+    expect(p.links).toEqual([
       {
         id: 'bridge-n1-n2',
         kind: 'context',
@@ -202,10 +208,7 @@ describe('link substrate persistence (context + lineage)', () => {
         target: { ref: 'node', nodeId: 'n2' },
         meta: { displayOnly: true }
       }
-    ]
-    useProjects.getState().commitCanvas('p1', [mkNode('n1')], { x: 0, y: 0, zoom: 1 }, links)
-    const p = useProjects.getState().projects[0]
-    expect(p.links).toEqual(links)
+    ])
     // Legacy fields are dropped on write (a migrated project stops carrying them).
     expect(p.bridges).toBeUndefined()
     expect(p.ropes).toBeUndefined()

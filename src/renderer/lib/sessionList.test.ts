@@ -674,6 +674,8 @@ describe('sidebar filter matches the PROJECT itself (issue #543)', () => {
   it('an unfiltered list is untouched by the project rule', () => {
     const unfiltered = buildSessionGroups(proj(), null, 'p1', {}, '')
     expect(unfiltered.map((g) => g.projectId)).toEqual(['p1', 'p2'])
+  })
+})
 
 describe('repo grouping', () => {
   // A bare project with a terminal session at a given cwd. `cwd` defaults to the repo root so a
@@ -851,5 +853,6 @@ describe('repo grouping', () => {
     expect(keys.has('repo::/repo')).toBe(true)
     expect(keys.has('project:p1')).toBe(true)
     expect(keys.has('project:p2')).toBe(true)
-    expect(keys.has('project:p2:group:g1')).toBe(true)  })
+    expect(keys.has('project:p2:group:g1')).toBe(true)
+  })
 })

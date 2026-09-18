@@ -187,6 +187,11 @@ const VERBS: ControlVerb[] = [
   'spawn-team',
   'open-worktree',
   'close-worktree',
+  // STAGED (ticket 03, branch-dependency links): registered in the model (parse + the
+  // non-destructive verdict run in main), but INERT until the renderer dispatch cases land —
+  // today the renderer's `default:` answers `unknown verb`. Deliberately undocumented in the
+  // skill/instructions bodies until then (spec §8: docs land in the same PR that makes the verb
+  // reachable), exactly as open-project was staged by issue #338 PR 1.
   'link-branches',
   'sync-stack',
   'branch',
@@ -477,15 +482,6 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  (or have the downstream agent merge the branch first). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
     '  the user to confirm deletion.',
-    '- `link-branches --base <parent> --branch <child>` — declare a stacked-diff dependency: the child',
-    '  branch builds on the parent. Writes the lineage to the shared git config (the git-town',
-    '  `git-town-branch.<child>.parent` convention) AND records a `dependency` link that renders as a',
-    '  dashed edge between the two worktree group frames. Local projects only. Declare it once per',
-    '  pair; the sync below uses it.',
-    '- `sync-stack [--branch <child>]` — rebase a child branch onto its parent (`git rebase <parent>`),',
-    '  run in the child\'s own worktree. Omit `--branch` is not supported from the agent verb yet —',
-    '  name the child. If the rebase stops on a conflict, the reply says so and the user resolves it',
-    '  in that terminal (`git rebase --continue`). No external tool: this is plain git.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '  Renaming to the title the node ALREADY has is a no-op: nothing is typed into its agent',
@@ -996,17 +992,6 @@ Verbs:
   \`git merge\` the upstream branch as its first step.
 - \`close-worktree --group <id> [--mode unbind|remove]\` — unbind (default) drops the binding
   and keeps the directory; remove asks the user to confirm deleting the worktree.
-- \`link-branches --base <parent> --branch <child>\` — declare a stacked-diff dependency: the
-  child branch is built on top of the parent. This writes the lineage to the shared git config
-  (the git-town \`git-town-branch.<child>.parent\` convention — readable by git-town if the user
-  has it, no binary required) AND records a \`dependency\` link that shows as a dashed edge
-  between the two worktree group frames. Local projects only. Declare it once per pair; it is
-  what \`sync-stack\` reads to know the parent.
-- \`sync-stack --branch <child>\` — rebase the child branch onto its parent (\`git rebase
-  <parent>\`), run in the child's own worktree (where the child is checked out). If the rebase
-  stops on a conflict, the reply says so and tells the user to resolve in that terminal and run
-  \`git rebase --continue\` (or \`--abort\`) — we do not hide a conflicted state as success, and
-  we do not auto-abort a partial resolution. Plain git, no external tool.
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).

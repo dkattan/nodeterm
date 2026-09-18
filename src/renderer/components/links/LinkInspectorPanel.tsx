@@ -75,12 +75,10 @@ export function LinkInspectorPanel({ nodeId, mount, onClose }: LinkInspectorPane
     if (!projectId) return
     const removed = allLinks.find((l) => l.id === id)
     const next = allLinks.filter((l) => l.id !== id)
-    // Persist via the same funnel the picker uses. Reading the project's stored nodes (not the
-    // active canvas's) so a background project isn't clobbered.
-    const stored = useProjects.getState().getProject(projectId)
-    useProjects
-      .getState()
-      .commitCanvas(projectId, stored?.nodes ?? [], stored?.viewport ?? { x: 0, y: 0, zoom: 1 }, next.length ? next : undefined)
+    // Persist via the store's whole-link writer: the list carries off-canvas links (xnode /
+    // branch dependencies) the edge-view commitCanvas would drop, and this panel's job is the
+    // whole set.
+    useProjects.getState().commitLinks(projectId, next)
     // A branch-dependency link OWNS a git-town lineage config entry: dropping the link must also
     // `git config --unset` the parent, or the config drifts from the (now gone) link set. Fire AFTER
     // the link is removed so the UI updates immediately; a failed unset is non-fatal (the lineage is
@@ -133,10 +131,7 @@ export function LinkInspectorPanel({ nodeId, mount, onClose }: LinkInspectorPane
           sourceProjectId={projectId}
           onConfirm={(link) => {
             const next = [...allLinks, link]
-            const stored = useProjects.getState().getProject(projectId)
-            useProjects
-              .getState()
-              .commitCanvas(projectId, stored?.nodes ?? [], stored?.viewport ?? { x: 0, y: 0, zoom: 1 }, next)
+            useProjects.getState().commitLinks(projectId, next)
             setAdding(false)
           }}
           onCancel={() => setAdding(false)}

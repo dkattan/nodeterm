@@ -182,6 +182,7 @@ export function resolveWorktreeBase(
     return { kind: 'error', error: `--base "${raw}" is the branch being created — a worktree cannot be based on itself` }
   }
   return { kind: 'ref', ref: raw }
+}
 
 /**
  * The shared-config key git-town uses to record a branch's parent: `git-town-branch.<child>.parent`.
