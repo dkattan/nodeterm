@@ -15,6 +15,10 @@ import {
   resolveModelGatewayApiKey,
   withAgentModel,
   claudeAutocompactFor,
+  claudeEffortFor,
+  claudeSubagentEnvFor,
+  claudeSubagentModelFor,
+  CLAUDE_SUBAGENT_EFFORT_FALLBACK,
   AUTOCOMPACT_THRESHOLD,
   AUTOCOMPACT_PCT_OVERRIDE,
   tmuxUpdateEnvironmentLine

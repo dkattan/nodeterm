@@ -78,6 +78,11 @@ export interface GatewayModel {
   /** Maximum output/completion tokens the model may produce, when reported. Retained as catalogue
    *  metadata for consumers; absent stays absent, never guessed. */
   maxOutputTokens?: number
+  /** Thinking-level metadata the gateway reports for the route (Bifrost's `reasoning` block on
+   *  `/v1/models`). `supportedEfforts` is the ordered list the route accepts and `defaultEffort`
+   *  its own preference; either may be absent, and a model with no reasoning metadata is NOT
+   *  evidence it lacks thinking — consumers must fall back rather than infer a capability. */
+  reasoning?: { supportedEfforts: readonly string[]; defaultEffort?: string }
 }
 
 export interface ModelDiscoveryResult {
@@ -169,6 +174,25 @@ function coerceTokenLimit(value: unknown): number | undefined {
   return n
 }
 
+/** Normalize one thinking-level word for comparison. Unknown shapes degrade to nothing: the
+ *  consumer falls back to its own default rather than sending an effort a route may reject. */
+function coerceEffortLevel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const effort = value.trim().toLowerCase()
+  return /^[a-z0-9_-]{1,32}$/.test(effort) ? effort : undefined
+}
+
+/** Parse a gateway's `reasoning` model metadata (Bifrost shape: `{supported_efforts, default_effort}`). */
+function parseGatewayReasoning(value: unknown): GatewayModel['reasoning'] | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const row = value as { supported_efforts?: unknown; default_effort?: unknown }
+  const supportedEfforts = Array.isArray(row.supported_efforts)
+    ? [...new Set(row.supported_efforts.map(coerceEffortLevel).filter((e): e is string => !!e))]
+    : []
+  const defaultEffort = coerceEffortLevel(row.default_effort)
+  return supportedEfforts.length ? { supportedEfforts, ...(defaultEffort ? { defaultEffort } : {}) } : undefined
+}
+
 /** Parse OpenAI-compatible model-list responses, dropping unsafe/empty/duplicate ids. */
 export function parseGatewayModels(payload: unknown): GatewayModel[] {
   if (!payload || typeof payload !== 'object') return []
@@ -187,6 +211,7 @@ export function parseGatewayModels(payload: unknown): GatewayModel[] {
       context_window?: unknown
       max_output_tokens?: unknown
       max_completion_tokens?: unknown
+      reasoning?: unknown
     }
     const id = typeof row.id === 'string' ? row.id.trim() : ''
     if (!id || id.length > 500 || /[\u0000-\u001f\u007f]/.test(id)) continue
@@ -207,12 +232,14 @@ export function parseGatewayModels(payload: unknown): GatewayModel[] {
       coerceTokenLimit(row.context_window)
     const maxOutputTokens =
       coerceTokenLimit(row.max_output_tokens) ?? coerceTokenLimit(row.max_completion_tokens)
+    const reasoning = parseGatewayReasoning(row.reasoning)
     byId.set(id, {
       id,
       ...(typeof row.name === 'string' && row.name.trim() ? { name: row.name.trim() } : {}),
       ...(explicitProvider || prefix ? { provider: explicitProvider || prefix } : {}),
       ...(contextWindow ? { contextWindow } : {}),
-      ...(maxOutputTokens ? { maxOutputTokens } : {})
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(reasoning ? { reasoning } : {})
     })
   }
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
@@ -317,6 +344,20 @@ export const AUTOCOMPACT_ENV_KEYS = [
   'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'
 ] as const
 
+/** Claude gateway routing and compatibility controls. Kept separate from autocompact so they
+ *  also reach sessions whose discovered models have no context-window metadata. */
+export const CLAUDE_CODE_SUBAGENT_MODEL_KEY = 'CLAUDE_CODE_SUBAGENT_MODEL'
+export const CLAUDE_SUBAGENT_ENV_KEYS = [
+  CLAUDE_CODE_SUBAGENT_MODEL_KEY,
+  'CLAUDE_CODE_SUBAGENT_MODEL_FORCE',
+  'CLAUDE_CODE_EFFORT_LEVEL'
+] as const
+
+/** The effort level requested when a model carries no discovered reasoning metadata. Kept as a
+ *  named constant because `claudeEffortFor`'s fallback and every test pinning the fallback must
+ *  not drift apart. */
+export const CLAUDE_SUBAGENT_EFFORT_FALLBACK = 'xhigh'
+
 /** tmux's own stock `update-environment` entries (tmux 3.4 defaults, measured via
  *  `show-options -g`). Assigning the option as a whole REPLACES the array, so the defaults must be
  *  restated or SSH agent forwarding et al. silently break. */
@@ -349,6 +390,7 @@ export function tmuxUpdateEnvironmentLine(extraNames: readonly string[] = []): s
       ...TMUX_STOCK_UPDATE_ENV,
       ...MODEL_GATEWAY_ENV_KEYS,
       ...AUTOCOMPACT_ENV_KEYS,
+      ...CLAUDE_SUBAGENT_ENV_KEYS,
       ...extraNames
     ])
   ]
@@ -534,4 +576,81 @@ export function claudeAutocompactFor(
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: AUTOCOMPACT_PCT_OVERRIDE
     }
   }
+}
+
+/** The gateway-served alias to prefer for Claude's subagent route when no explicit default is
+ *  configured. Our inference box serves reasoning work under this alias; an administrator-defined
+ *  id is ordinary catalogue data, so discovery alone cannot know it is THE alias. */
+const CLAUDE_SUBAGENT_PREFERRED_ALIAS = 'reasoning'
+
+/** Choose only a model the current gateway catalogue says it serves. The configured default wins
+ *  when present; otherwise the `reasoning` alias when the catalogue lists it (the inference box's
+ *  heavy-work route); otherwise sort here so callers need not know how the catalogue was produced. */
+export function claudeSubagentModelFor(
+  models: readonly GatewayModel[],
+  defaultModel?: string
+): string | undefined {
+  const ids = [...new Set(modelsForAgent(models, 'claude').map((model) => model.id.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+  const preferred = defaultModel?.trim()
+  if (preferred && ids.includes(preferred)) return preferred
+  if (ids.includes(CLAUDE_SUBAGENT_PREFERRED_ALIAS)) return CLAUDE_SUBAGENT_PREFERRED_ALIAS
+  return ids[0]
+}
+
+/** The highest effort a route accepts — thinking scales with capability, and the list order carries
+ *  no ranking of its own. */
+function highestSupportedEffort(supported: readonly string[]): string | undefined {
+  return supported.length ? supported[supported.length - 1] : undefined
+}
+
+/** The thinking level to request from one discovered model: the route's own `default_effort` when
+ *  reported (the provider knows its model), else its highest supported level, else the launcher's
+ *  prior static default. Absent reasoning metadata is NOT evidence thinking is unsupported —
+ *  discovery omits the block on some served routes — so the fallback is the default, never an
+ *  omission: Claude clamps unknown levels itself, and a route that rejects one errors noisily
+ *  rather than silently un-thinking every subagent. */
+export function claudeEffortFor(models: readonly GatewayModel[], modelId: string | undefined): string {
+  const base = modelId?.trim().replace(/\[1m\]$/, '')
+  const model = models.find((m) => m.id.replace(/\[1m\]$/, '') === base)
+  return (
+    model?.reasoning?.defaultEffort ??
+    (model?.reasoning ? highestSupportedEffort(model.reasoning.supportedEfforts) : undefined) ??
+    CLAUDE_SUBAGENT_EFFORT_FALLBACK
+  )
+}
+
+/** Build Claude's gateway subagent routing independently from large-context launch handling.
+ *  Since Claude Code 2.1.251, an Agent call's explicit model (e.g. `sonnet`) beats SUBAGENT_MODEL.
+ *  FORCE (2.1.257+) restores the override, keeping those calls on a model the gateway serves:
+ *  https://code.claude.com/docs/en/sub-agents#run-every-subagent-on-one-model
+ *
+ *  The effort level comes from the selected model's discovered `reasoning` metadata (see
+ *  `claudeEffortFor`). This env var affects the parent AND children;
+ *  there is no subagent-only effort env. Project/custom-agent env is merged later and can override
+ *  the default. With no served route, emit no controls or guessed capabilities. */
+export function claudeSubagentEnvFor(
+  agentId: AgentId,
+  models: readonly GatewayModel[],
+  defaultModel?: string
+): Record<string, string> {
+  if (capabilityAgentId(agentId) !== 'claude') return {}
+  const model = claudeSubagentModelFor(models, defaultModel)
+  return model ? {
+    [CLAUDE_CODE_SUBAGENT_MODEL_KEY]: model,
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+    CLAUDE_CODE_EFFORT_LEVEL: claudeEffortFor(models, model)
+  } : {}
+}
+
+/** Current reported window for either plain or `[1m]` spelling of one model id. */
+export function modelContextWindow(
+  modelId: string | undefined,
+  models: readonly GatewayModel[]
+): number | undefined {
+  const id = modelId?.trim()
+  if (!id) return undefined
+  const base = id.replace(/\[1m\]$/, '')
+  const value = models.find((model) => model.id.replace(/\[1m\]$/, '') === base)?.contextWindow
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
