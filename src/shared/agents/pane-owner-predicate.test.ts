@@ -215,8 +215,9 @@ describe('binariesFor', () => {
     ]
     expect(binariesFor('custom:proxy', list)).toEqual(['claude'])
     expect(binariesFor('custom:gproxy', list)).toEqual(['gemini'])
-    // An explicit command still wins over the base — it is what actually runs.
-    expect(binariesFor('custom:own', list)).toEqual(['my-wrapper'])
+    // An explicit command still wins as the FIRST identity — it is what actually runs — but the
+    // base's binaries ride along, since a wrapper commonly execs into the base harness.
+    expect(binariesFor('custom:own', list)).toEqual(['my-wrapper', 'claude'])
     // No (valid) base and no command: nothing honest to name.
     expect(binariesFor('custom:bogus', list)).toBeNull()
     expect(binariesFor('custom:none', list)).toBeNull()

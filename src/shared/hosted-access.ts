@@ -30,6 +30,7 @@ export const HOSTED_VIEW_METHODS: readonly string[] = Object.freeze([
   IPC.gitDiff,
   IPC.gitShowFile,
   IPC.gitHistory,
+  IPC.gitSubmoduleList,
   IPC.agentSubagentSnapshot,
   IPC.presenceHello,
   IPC.presenceCursor,

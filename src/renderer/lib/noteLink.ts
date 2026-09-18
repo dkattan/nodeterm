@@ -120,7 +120,10 @@ export function planBridges(
     }
     const te = lookup(tid)
     if (!se || !te) {
-      skipped.push({ id: tid, why: 'no such node' })
+      // The lookup is deliberately scoped to the calling project, so "not found" cannot mean
+      // "does not exist" — the id may belong to another project. Say that, not a false absence,
+      // and grant nothing.
+      skipped.push({ id: tid, why: 'node not found in this project; cross-project linking is not supported' })
       continue
     }
     const kind = classifyLink(se, te)

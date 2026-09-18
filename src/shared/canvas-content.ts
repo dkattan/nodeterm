@@ -29,11 +29,21 @@ export interface CanvasContent {
 /** A project's content, with absent edge lists read as empty. The board stays absent when absent:
  *  "no board yet" and "the default board" read the same everywhere, and materializing one here
  *  would put a `kanban` block into a file nobody edited a board in. */
-export function contentOf(p: Pick<Project, 'nodes' | 'bridges' | 'ropes' | 'kanban'>): CanvasContent {
+/** A project's content, with absent edge lists read as empty. The board stays absent when absent:
+ *  "no board yet" and "the default board" read the same everywhere, and materializing one here
+ *  would put a `kanban` block into a file nobody edited a board in.
+ *
+ * Under the unified link substrate, a project's on-canvas edges live in `links` (context/lineage
+ * kinds) and the legacy `bridges`/`ropes` fields are a file-seam projection — so when the legacy
+ * fields are absent, the views are DERIVED here. Every consumer of CanvasContent (the diff, the
+ * appliers, the publish hook) then sees the same edges whichever shape the project carries. */
+export function contentOf(p: Pick<Project, 'nodes' | 'bridges' | 'ropes' | 'links' | 'kanban'>): CanvasContent {
+  const bridges = p.bridges ?? (p.links ?? []).filter((l) => l.kind === 'context' && l.source.ref === 'node' && l.target.ref === 'node').map((l) => ({ id: l.id, source: (l.source as { ref: 'node'; nodeId: string }).nodeId, target: (l.target as { ref: 'node'; nodeId: string }).nodeId }))
+  const ropes = p.ropes ?? (p.links ?? []).filter((l) => l.kind === 'lineage' && l.source.ref === 'node' && l.target.ref === 'node').map((l) => ({ id: l.id, source: (l.source as { ref: 'node'; nodeId: string }).nodeId, target: (l.target as { ref: 'node'; nodeId: string }).nodeId }))
   return {
     nodes: p.nodes ?? [],
-    bridges: p.bridges ?? [],
-    ropes: p.ropes ?? [],
+    bridges,
+    ropes,
     ...(p.kanban ? { kanban: p.kanban } : {})
   }
 }

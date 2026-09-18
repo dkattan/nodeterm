@@ -10,7 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import { createCanvasAuthority } from '../core/canvas-authority'
 import { initCanvasSync, publishCanvasMutation, setReflectedListener } from '../core/canvas-sync'
 import { IPC } from '../shared/ipc'
-import type { CanvasMutation, CanvasNodeState, Project, Workspace } from '../shared/types'
+import type { CanvasMutation, CanvasNodeState, Link, Project, Workspace } from '../shared/types'
 import { createServerWorkspaceWatcher, outsideEditPublisher } from './workspace-external-watch'
 
 const node = (id: string, x: number): CanvasNodeState => ({
@@ -55,13 +55,13 @@ describe('Server Edition external workspace watcher', () => {
       cwd: projectDir,
       viewport: { x: 0, y: 0, zoom: 1 },
       nodes: [source, removed, kept],
-      bridges: [
-        { id: 'bridge-removed', source: source.id, target: removed.id },
-        { id: 'bridge-kept', source: source.id, target: kept.id }
-      ],
-      ropes: [
-        { id: 'rope-removed', source: source.id, target: removed.id },
-        { id: 'rope-kept', source: source.id, target: kept.id }
+      // The unified link substrate: legacy `bridges`/`ropes` on the wire migrate into `links` on
+      // load, and the hand edit below removes the same dead endpoints from the `links` array.
+      links: [
+        { id: 'bridge-removed', kind: 'context', source: { ref: 'node', nodeId: source.id }, target: { ref: 'node', nodeId: removed.id } },
+        { id: 'bridge-kept', kind: 'context', source: { ref: 'node', nodeId: source.id }, target: { ref: 'node', nodeId: kept.id } },
+        { id: 'rope-removed', kind: 'lineage', source: { ref: 'node', nodeId: source.id }, target: { ref: 'node', nodeId: removed.id }, meta: { displayOnly: true } },
+        { id: 'rope-kept', kind: 'lineage', source: { ref: 'node', nodeId: source.id }, target: { ref: 'node', nodeId: kept.id }, meta: { displayOnly: true } }
       ]
     }
     const workspace: Workspace = {
@@ -79,18 +79,15 @@ describe('Server Edition external workspace watcher', () => {
       rev: number
       updatedAt: string
       nodes: CanvasNodeState[]
-      bridges: Array<{ id: string; source: string; target: string }>
-      ropes: Array<{ id: string; source: string; target: string }>
+      links: Link[]
     }
+    const touchesRemoved = (l: Link): boolean =>
+      (l.source.ref === 'node' && l.source.nodeId === removed.id) ||
+      (l.target.ref === 'node' && l.target.nodeId === removed.id)
     edited.rev += 1
     edited.updatedAt = new Date(Date.now() + 1_000).toISOString()
     edited.nodes = edited.nodes.filter((candidate) => candidate.id !== removed.id)
-    edited.bridges = edited.bridges.filter(
-      (edge) => edge.source !== removed.id && edge.target !== removed.id
-    )
-    edited.ropes = edited.ropes.filter(
-      (edge) => edge.source !== removed.id && edge.target !== removed.id
-    )
+    edited.links = edited.links.filter((l) => !touchesRemoved(l))
     await fs.writeFile(file, JSON.stringify(edited), 'utf8')
 
     await vi.waitFor(() => {
@@ -100,8 +97,8 @@ describe('Server Edition external workspace watcher', () => {
     const event = fake.sent.filter((entry) => entry.channel === IPC.workspaceExternalChange).at(-1)!
     const incoming = event.args[0] as Project
     expect(incoming.nodes.map((candidate) => candidate.id)).toEqual([source.id, kept.id])
-    expect(incoming.bridges).toEqual([{ id: 'bridge-kept', source: source.id, target: kept.id }])
-    expect(incoming.ropes).toEqual([{ id: 'rope-kept', source: source.id, target: kept.id }])
+    expect(incoming.links?.filter((l) => l.kind === 'context').map((l) => l.id)).toEqual(['bridge-kept'])
+    expect(incoming.links?.filter((l) => l.kind === 'lineage').map((l) => l.id)).toEqual(['rope-kept'])
     // This one IS an outside edit — a hand edit or a git pull — so it belongs on the channel the
     // renderer answers with the conflict bar, and must never be swapped onto the server-write
     // channel a later refactor might mistake it for (that one merges silently, no question asked).
@@ -164,12 +161,13 @@ describe('Server Edition external workspace watcher', () => {
         )
       })
 
-      // A git pull removes the bridge from the governed project.
+      // A git pull removes the bridge from the governed project. The file carries the UNIFIED
+      // `links` (projectToFile writes the new shape only), so the removal edits that list.
       const file = path.join(projectDir, '.nodeterm', 'project.json')
-      const edited = JSON.parse(await fs.readFile(file, 'utf8')) as { rev: number; updatedAt: string; bridges: unknown[] }
+      const edited = JSON.parse(await fs.readFile(file, 'utf8')) as { rev: number; updatedAt: string; links?: unknown[] }
       edited.rev += 1
       edited.updatedAt = new Date(Date.now() + 1_000).toISOString()
-      edited.bridges = []
+      edited.links = []
       await fs.writeFile(file, JSON.stringify(edited), 'utf8')
       const muts = (): CanvasMutation[] =>
         fake.sent.filter((e) => e.channel === IPC.canvasMut && e.args[0] === governedProject.id).map((e) => e.args[1] as CanvasMutation)

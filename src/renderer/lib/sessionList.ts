@@ -213,20 +213,6 @@ export function signalCounts(rows: SessionRowVM[]): SignalCounts {
   return { attention, unread, working }
 }
 
-/** Same signals as `projectSignalCounts`, summed across every project in a `RepoGroup` — the repo
- *  header aggregates the attention/unread/working counts of all the projects nested under it. */
-export function repoSignalCounts(repo: RepoGroup): { attention: number; unread: number; working: number } {
-  return repo.projects.reduce(
-    (acc, g) => {
-      const c = projectSignalCounts(g)
-      return {
-        attention: acc.attention + c.attention,
-        unread: acc.unread + c.unread,
-        working: acc.working + c.working
-      }
-    },
-    { attention: 0, unread: 0, working: 0 }
-  )
 export function projectSignalCounts(group: SessionGroup): SignalCounts {
   return signalCounts([...group.ungrouped, ...group.groups.flatMap(groupSessionRows)])
 }
@@ -240,6 +226,22 @@ export function projectSignalCounts(group: SessionGroup): SignalCounts {
  */
 export function groupSignalCounts(group: GroupBucket): SignalCounts {
   return signalCounts(groupSessionRows(group))
+}
+
+/** Same signals as `projectSignalCounts`, summed across every project in a `RepoGroup` — the repo
+ *  header aggregates the attention/unread/working counts of all the projects nested under it. */
+export function repoSignalCounts(repo: RepoGroup): SignalCounts {
+  return repo.projects.reduce(
+    (acc, g) => {
+      const c = projectSignalCounts(g)
+      return {
+        attention: acc.attention + c.attention,
+        unread: acc.unread + c.unread,
+        working: acc.working + c.working
+      }
+    },
+    { attention: 0, unread: 0, working: 0 }
+  )
 }
 
 export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {

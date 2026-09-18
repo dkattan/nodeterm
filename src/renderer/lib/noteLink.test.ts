@@ -7,6 +7,7 @@ import {
   classifyLink,
   hiddenLinkIds,
   linkIdsCoveredByRopes,
+  nodeEndpoints,
   pairKey,
   planBridges
 } from './noteLink'
@@ -96,7 +97,9 @@ describe('planBridges', () => {
     const plan = planBridges('n1', ['remote', 'ghost', 'n2'],
       (id) => projects.caller[id] ?? null, [])
     expect(plan.linked).toEqual(['n2'])
-    expect(plan.edges).toEqual([{ id: 'bridge-n1-n2', source: 'n1', target: 'n2' }])
+    expect(plan.edges.map((l) => nodeEndpoints(l)!)).toEqual([
+      { id: 'bridge-n1-n2', source: 'n1', target: 'n2' }
+    ])
     expect(plan.skipped).toEqual([
       { id: 'remote', why: 'node not found in this project; cross-project linking is not supported' },
       { id: 'ghost', why: 'node not found in this project; cross-project linking is not supported' }

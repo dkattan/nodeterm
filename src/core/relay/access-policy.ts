@@ -255,6 +255,7 @@ export const VIEW: Readonly<Record<string, Check>> = Object.freeze({
   [IPC.gitShowFile]: gitView(gitShowFile),
   // Its only other argument's ref (`baseRef`) is refused by the core when it starts with `-`.
   [IPC.gitHistory]: gitView(),
+  [IPC.gitSubmoduleList]: gitView(),
   // The RESPONSE is trimmed by narrowResponseForRole (it is a response, not an event).
   [IPC.agentSubagentSnapshot]: pass,
   [IPC.presenceHello]: pass,
@@ -349,6 +350,13 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   IPC.gitDiscard,
   IPC.gitSwitchBranch,
   IPC.gitCreateBranch,
+  // The branch-dependency / stacked-diff writes (ticket 03): git config writes and network PR
+  // creation. Host-side, opinionated operations — a viewer never drives these.
+  IPC.gitSetBranchParent,
+  IPC.gitUnsetBranchParent,
+  IPC.gitSyncBranch,
+  IPC.gitProposeBranch,
+  IPC.gitShipBranch,
   IPC.commitGenerate,
   IPC.gitCommitFiles,
   IPC.gitRemoteCommitUrl,

@@ -432,7 +432,8 @@ export function projectToFile(
     viewport: framingViewport(nodes),
     nodes,
     ...(icon ? { icon } : {}),
-    ...(links ? { links } : {}),    ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
+    ...(links ? { links } : {}),
+    ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
     // Strict-normalised (literal true only, known keys only) and omitted when off — an off
     // capability adds no bytes to the committed file. `capabilityAck` is deliberately NOT here:
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.

@@ -15708,7 +15708,6 @@ body.focus-mode .dock:hover {
   white-space: nowrap;
 }
 
-<<<<<<< HEAD
 /* A row's download mark (spinner → ✓ / !), pushed to the row's end. Same colours as the Explorer's
    ⤓ states — one fact, read the same way on both surfaces. The spinner is `.ex-dl__spin`. */
 .files-node__dl {
@@ -15726,7 +15725,8 @@ body.focus-mode .dock:hover {
 .files-node__dl.error {
   color: var(--danger);
   font-weight: 700;
-=======
+}
+
 /* ── Off-canvas link authoring (ticket 06): LinkTargetPicker + LinkInspectorPanel ── */
 .link-picker {
   width: 520px;
@@ -15835,7 +15835,6 @@ body.focus-mode .dock:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
->>>>>>> 281130c9 (feat: cross-repo links substrate + custom-agent harness + model-switch + codex accounts)
 }
 
 .files-node__empty {
@@ -15851,7 +15850,6 @@ body.focus-mode .dock:hover {
   border-bottom: none;
 }
 
-<<<<<<< HEAD
 /* ==== Liquid Glass appearance (Settings → Appearance → Liquid Glass) ===========================
    Everything below is scoped to `:root[data-nt-glass='on']`, which App.tsx sets only for that
    appearance, so the default look is untouched. `--glass-chrome-bg` is the ONE chrome fill: the
@@ -16998,7 +16996,8 @@ body.focus-mode .dock:hover {
 .glass-slider__readable:focus-visible {
   border-radius: 3px;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent);
-=======
+}
+
 .link-picker__node-agent,
 .link-picker__node-xnode {
   font-size: 10px;
@@ -17160,8 +17159,8 @@ body.focus-mode .dock:hover {
   border-radius: 4px;
 }
 .link-row__delete:hover {
-  color: #ff453a;
-  background: rgba(255, 69, 58, 0.1);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 .link-inspector__add {
   margin: 6px;
@@ -17213,5 +17212,4 @@ body.focus-mode .dock:hover {
 .term-node__link[aria-pressed='true'] {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
->>>>>>> 281130c9 (feat: cross-repo links substrate + custom-agent harness + model-switch + codex accounts)
 }

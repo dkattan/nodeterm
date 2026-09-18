@@ -532,6 +532,9 @@ export const IconLink = () => (
   <svg {...S}>
     <path d="M9 12a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5L10 6" />
     <path d="M15 12a3.5 3.5 0 0 0-5 0L7.5 14.5a3.5 3.5 0 0 0 5 5L14 18" />
+  </svg>
+)
+
 /** GitHub mark, drawn in the same 24px/2px stroke grid as the lucide glyphs it sits beside (the
  *  project-icon picker's Avatar tab). Ours because lucide-react 1.x removed its brand icons. */
 export const IconGithub = ({ className }: { className?: string }) => (

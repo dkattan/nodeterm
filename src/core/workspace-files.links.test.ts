@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import type { CanvasNodeState, Project } from '../shared/types'
 import { fileToProject, projectToFile, sanitizeLinks } from './workspace-files'
+import type { Link } from '../shared/types'
+const contextLink = (source: string, target: string): Link => ({
+  id: `bridge-${source}-${target}`,
+  kind: 'context',
+  source: { ref: 'node', nodeId: source },
+  target: { ref: 'node', nodeId: target }
+})
+const lineageLink = (source: string, target: string): Link => ({
+  id: `ctrl-${source}-${target}`,
+  kind: 'lineage',
+  source: { ref: 'node', nodeId: source },
+  target: { ref: 'node', nodeId: target },
+  meta: { displayOnly: true }
+})
 
 // `bridges` / `ropes` come straight out of the git-shared, hand-editable project file, and every
 // reader maps them as `BridgeLink[]` — the canvas's rope restore did `ropes.map((r) => r.id)`, so a
@@ -42,8 +56,7 @@ describe('the file seams admit only readable links', () => {
       bridges: 'nope'
     }
     const p = fileToProject(file as never, { id: 'p1' })
-    expect(p.ropes).toEqual([rope('a', 'b')])
-    expect(p.bridges).toBeUndefined()
+    expect(p.links).toEqual([lineageLink('a', 'b')])
   })
 
   it('projectToFile (what we write is what the next machine trusts)', () => {
@@ -52,7 +65,15 @@ describe('the file seams admit only readable links', () => {
       ropes: [rope('a', 'b'), { id: 7 }], bridges: [rope('a', 'b')]
     } as unknown as Project
     const file = projectToFile(project, 1, '2026-09-29T00:00:00.000Z')
-    expect(file.ropes).toEqual([rope('a', 'b')])
-    expect(file.bridges).toEqual([rope('a', 'b')])
+    // The substrate's two-seam rule: a hostile legacy entry is dropped on the way OUT too, and the
+    // legacy fields themselves never reach the file — the unified `links` is the only form written.
+    // migrateLinks preserves legacy ids VERBATIM: the bridge seeded with a `ctrl-` id stays
+    // `ctrl-` (just kind:context), and ropes keep theirs. Order: bridges before ropes.
+    expect(file.links).toEqual([
+      { ...contextLink('a', 'b'), id: 'ctrl-a-b' },
+      lineageLink('a', 'b')
+    ])
+    expect(file.ropes).toBeUndefined()
+    expect(file.bridges).toBeUndefined()
   })
 })

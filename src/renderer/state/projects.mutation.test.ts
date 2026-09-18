@@ -126,7 +126,10 @@ describe('applyEdgeMutation', () => {
     expect(
       useProjects.getState().applyEdgeMutation(p.id, { op: 'edge-upsert', kind: 'bridge', edge: link('x') })
     ).toBe(true)
-    expect(useProjects.getState().getProject(p.id)?.bridges).toEqual([link('x')])
+    // The unified store: on-canvas links live in `links` (context = bridge).
+    expect(
+      (useProjects.getState().getProject(p.id)?.links ?? []).map((l) => ({ id: l.id, source: (l.source as { nodeId: string }).nodeId, target: (l.target as { nodeId: string }).nodeId }))
+    ).toEqual([link('x')])
   })
 
   // A project that never had a list must not have `"bridges": []` materialized into its file by a
@@ -134,15 +137,20 @@ describe('applyEdgeMutation', () => {
   it('leaves an absent list absent and the untouched kind by reference', () => {
     const p = useProjects.getState().addProject('p')
     useProjects.getState().commitCanvas(p.id, [node('a'), node('b')], { x: 0, y: 0, zoom: 1 })
-    expect(useProjects.getState().getProject(p.id)?.bridges).toBeUndefined()
+    expect(useProjects.getState().getProject(p.id)?.links).toBeUndefined()
     useProjects.getState().applyEdgeMutation(p.id, { op: 'edge-upsert', kind: 'rope', edge: link('ctrl-1') })
     const after = useProjects.getState().getProject(p.id)
-    expect(after?.bridges).toBeUndefined()
-    expect(after?.ropes).toEqual([link('ctrl-1')])
+    // Unified store: one `links` list holds both kinds; the rope lands as a lineage Link.
+    expect(after?.links?.map((l) => ({ id: l.id, kind: l.kind, src: (l.source as { nodeId: string }).nodeId, dst: (l.target as { nodeId: string }).nodeId })))
+      .toEqual([{ id: 'ctrl-1', kind: 'lineage', src: 'a', dst: 'b' }])
 
-    const ropes = after?.ropes
     useProjects.getState().applyEdgeMutation(p.id, { op: 'edge-upsert', kind: 'bridge', edge: link('x') })
-    expect(useProjects.getState().getProject(p.id)?.ropes).toBe(ropes)
+    const now = useProjects.getState().getProject(p.id)?.links ?? []
+    // The rope entry is untouched by the bridge append; the rebuild preserves it by value.
+    expect(now.filter((l) => l.id === 'ctrl-1')).toEqual(
+      (after?.links ?? []).filter((l) => l.id === 'ctrl-1')
+    )
+    expect(now.map((l) => l.kind).sort()).toEqual(['context', 'lineage'])
   })
 
   it('an edge id lives in one list', () => {
@@ -150,11 +158,16 @@ describe('applyEdgeMutation', () => {
     useProjects
       .getState()
       .commitCanvas(p.id, [node('a'), node('b')], { x: 0, y: 0, zoom: 1 }, [link('x')], [])
+    // The unified store keeps on-canvas links in `links` (context/lineage kinds); the legacy
+    // bridges/ropes views are a file-seam projection, so assert through the kind view.
     useProjects.getState().applyEdgeMutation(p.id, { op: 'edge-upsert', kind: 'rope', edge: link('x') })
-    expect(useProjects.getState().getProject(p.id)?.bridges).toEqual([])
-    expect(useProjects.getState().getProject(p.id)?.ropes).toEqual([link('x')])
+    const kinds = (useProjects.getState().getProject(p.id)?.links ?? []).map((l) => l.kind)
+    expect(kinds).toEqual(['lineage'])
+    expect(
+      (useProjects.getState().getProject(p.id)?.links ?? []).map((l) => (l.source as { nodeId: string }).nodeId + '>' + (l.target as { nodeId: string }).nodeId)
+    ).toEqual(['a>b'])
     useProjects.getState().applyEdgeMutation(p.id, { op: 'edge-remove', kind: 'bridge', id: 'x' })
-    expect(useProjects.getState().getProject(p.id)?.ropes).toEqual([])
+    expect(useProjects.getState().getProject(p.id)?.links).toBeUndefined()
   })
 })
 
@@ -182,7 +195,10 @@ describe('applyCanvasOp', () => {
     expect(
       useProjects.getState().applyCanvasOp(id, { op: 'edge-upsert', kind: 'bridge', edge: link('x') })
     ).toBe(true)
-    expect(useProjects.getState().getProject(id)?.bridges).toEqual([link('x')])
+    // Unified store: the bridge lands as a context Link in `links`.
+    expect(
+      (useProjects.getState().getProject(id)?.links ?? []).map((l) => ({ id: l.id, source: (l.source as { nodeId: string }).nodeId, target: (l.target as { nodeId: string }).nodeId }))
+    ).toEqual([link('x')])
   })
 
   it('applies a board op, materializing the lazy default board', () => {

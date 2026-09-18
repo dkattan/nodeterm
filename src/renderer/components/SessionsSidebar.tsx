@@ -33,6 +33,7 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
+import { ProjectBranch } from './ProjectBranch'
 import { useSession } from '../session/session'
 import { useWorktrees } from '../state/worktrees'
 import type { WorktreeEntry } from '@shared/worktree'
@@ -156,11 +157,8 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
-  // This sidebar's core api (a stable context read — the branch lookups run on the session's git).
+  // This sidebar's core api (the per-project repo-root lookups run on the session's git).
   const { api } = useSession()
-  // Per-project branch chips (best-effort, cached; '' = known non-repo). Fed by the lookup effect
-  // below and rendered by the repo grouping.
-  const [branches, setBranches] = useState<Record<string, string>>({})
   // Worktree facts for repo grouping: per-project resolved repo roots (cross-project map, survives
   // a project switch) and the active project's unbound worktrees (orphans — only the active project
   // is resolved by the store, matching the cadence discipline).
@@ -194,32 +192,6 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const collapsedItems = useSettings((s) => s.settings.sidebarCollapsedItems)
   const grouping = useSettings((s) => s.settings.sidebarGrouping)
   const updateSettings = useSettings((s) => s.update)
-
-  // Look up the current git branch for each project cwd (best-effort, cached). Gated on `open`
-  // and caches a NEGATIVE result too — without the '' fallback a non-git cwd re-fired a git
-  // subprocess on every projects-store change, forever.
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    projects.forEach((p) => {
-      if (!p.cwd || branches[p.id] !== undefined) return
-      api.git
-        .status(p.cwd)
-        .then((st) => {
-          if (cancelled) return
-          const branch = st && typeof st.branch === 'string' ? st.branch : ''
-          setBranches((b) => ({ ...b, [p.id]: branch }))
-        })
-        .catch(() => {
-          if (!cancelled) setBranches((b) => ({ ...b, [p.id]: '' }))
-        })
-    })
-    return () => {
-      cancelled = true
-    }
-    // `api` is a safe dep: this effect only fetches (cancellation flag, no resource), and the
-    // local session's api is referentially stable, so adding it changes nothing today.
-  }, [open, projects, branches, api])
 
   // Resolve the repo root for NON-ACTIVE open projects (the active one is resolved by the worktree
   // store's `refresh`). This is a single `git rev-parse --show-toplevel` per project — the same
@@ -716,9 +688,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
               className="ss-group__monogram"
             />
             <span className="ss-group__name">{g.projectName}</span>
-            {branches[g.projectId] && (
-              <span className="ss-group__branch">⎇ {branches[g.projectId]}</span>
-            )}
+            <ProjectBranch project={projects.find((p) => p.id === g.projectId)!} />
             {signals.attention > 0 && (
               <span className="ss-group__sig ss-group__sig--attention" title="Sessions that need you">
                 <IconBellFilled />
@@ -956,6 +926,9 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                   {isRepoCollapsed ? '▶' : '▼'}
                 </button>
                 <span className="ss-repo__name">{repo.repoName}</span>
+                {repo.collapsedProject && (
+                  <ProjectBranch project={projects.find((p) => p.id === repo.projects[0].projectId)!} />
+                )}
                 {repo.projects.length > 1 && (
                   <span className="ss-repo__count" title={`${repo.projects.length} projects`}>
                     {repo.projects.length}
@@ -980,27 +953,6 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                   </span>
                 )}
                 <span className="ss-group__count">{projectCount(repo)}</span>
-                <ProjectGlyph
-                  icon={g.projectIcon}
-                  color={g.projectColor}
-                  name={g.projectName}
-                  variant="monogram"
-                  className="ss-group__monogram"
-                />
-                <span className="ss-group__name" title={g.projectName}>{g.projectName}</span>
-                <ProjectBranch project={projects.find((p) => p.id === g.projectId)!} />
-                <SignalBadges counts={signals} scope="project" />
-                <span className="ss-group__count">{projectCount(g)}</span>
-                <button
-                  className="ss-group__add"
-                  title="Add a node to this project"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    props.onAddToProject(g.projectId, { clientX: e.clientX, clientY: e.clientY })
-                  }}
-                >
-                  +
-                </button>
               </div>
               {!isRepoCollapsed && (
                 <>

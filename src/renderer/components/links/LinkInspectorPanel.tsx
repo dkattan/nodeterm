@@ -76,8 +76,7 @@ export function LinkInspectorPanel({ nodeId, mount, onClose }: LinkInspectorPane
     const removed = allLinks.find((l) => l.id === id)
     const next = allLinks.filter((l) => l.id !== id)
     // Persist via the same funnel the picker uses. Reading the project's stored nodes (not the
-    // active canvas's) so a background project isn't clobbered.
-    // Persist via the store's whole-link writer: the list carries off-canvas links (xnode /
+    // active canvas's) so a background project isn't clobbered.    // Persist via the store's whole-link writer: the list carries off-canvas links (xnode /
     // branch dependencies) the edge-view commitCanvas would drop, and this panel's job is the
     // whole set.
     useProjects.getState().commitLinks(projectId, next)

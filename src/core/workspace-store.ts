@@ -154,13 +154,22 @@ const edgeList = (next: BridgeLink[], prev: BridgeLink[] | undefined): BridgeLin
  *  the machine-local half — is `base`'s. */
 function withContent(base: Project, content: CanvasContent): Project {
   const out: Project = { ...base, nodes: content.nodes }
-  const bridges = edgeList(content.bridges, base.bridges)
-  const ropes = edgeList(content.ropes, base.ropes)
+  // Edges go through the UNIFIED substrate: the views (content.bridges/ropes) become context/
+  // lineage Links in `links`, keeping every off-canvas link `base` already held. New builds never
+  // write the legacy `bridges`/`ropes` fields (projectToFile drops them), so writing them here
+  // would silently lose every edge on the authority's flush.
+  const offCanvas = (base.links ?? []).filter((l) => l.kind !== 'context' && l.kind !== 'lineage')
+  const rebuilt: Link[] = []
+  for (const b of content.bridges ?? []) {
+    rebuilt.push({ id: b.id, kind: 'context', source: { ref: 'node', nodeId: b.source }, target: { ref: 'node', nodeId: b.target } })
+  }
+  for (const r of content.ropes ?? []) {
+    rebuilt.push({ id: r.id, kind: 'lineage', source: { ref: 'node', nodeId: r.source }, target: { ref: 'node', nodeId: r.target }, meta: { displayOnly: true } })
+  }
+  const links = [...rebuilt, ...offCanvas]
+  if (links.length) out.links = links
+  else delete out.links
   const kanban = boardWithFileConfig(content.kanban, base.kanban)
-  if (bridges) out.bridges = bridges
-  else delete out.bridges
-  if (ropes) out.ropes = ropes
-  else delete out.ropes
   if (kanban) out.kanban = kanban
   else delete out.kanban
   return out

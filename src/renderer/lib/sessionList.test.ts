@@ -483,12 +483,12 @@ describe('groupSignalCounts', () => {
   }
 
   it('counts the frame whole subtree, nested frames included', () => {
-    const [g] = buildSessionList(proj, null, 'p1', status, '')
+    const [g] = buildSessionGroups(proj, null, 'p1', status, '')
     expect(groupSignalCounts(g.groups[0])).toEqual({ attention: 1, unread: 0, working: 1 })
   })
 
   it('counts only its own subtree, not the rest of the project', () => {
-    const [g] = buildSessionList(proj, null, 'p1', status, '')
+    const [g] = buildSessionGroups(proj, null, 'p1', status, '')
     // The inner frame sees only c1; the ungrouped t1 belongs to no frame and is the difference
     // between the frame totals and the project total.
     expect(groupSignalCounts(g.groups[0].children[0])).toEqual({
@@ -510,12 +510,12 @@ describe('groupSignalCounts', () => {
     ]
     // The absence of a working badge is what tells the user the task is waiting for them, so a
     // quiet frame must report zeros rather than anything the header could render.
-    const [g] = buildSessionList(quiet, null, 'p1', {}, '')
+    const [g] = buildSessionGroups(quiet, null, 'p1', {}, '')
     expect(groupSignalCounts(g.groups[0])).toEqual({ attention: 0, unread: 0, working: 0 })
   })
 
   it('counts the rows the sidebar is showing, so an active filter narrows it', () => {
-    const [g] = buildSessionList(proj, null, 'p1', status, 'c1')
+    const [g] = buildSessionGroups(proj, null, 'p1', status, 'c1')
     // a1 is filtered out of the tree, so the badge must not claim an attention the user cannot
     // see or click — the same rule the project badge already follows.
     expect(groupSignalCounts(g.groups[0])).toEqual({ attention: 0, unread: 0, working: 1 })

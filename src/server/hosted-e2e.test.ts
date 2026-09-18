@@ -607,17 +607,26 @@ describe.skipIf(process.platform === 'win32')('hosted team relay, end to end on 
     // The authority writes it with nobody saving (its 1 s / 5 s bounds are pinned on a manual clock
     // in canvas-authority.test.ts): read the file until it holds ALL THREE ops, parsed — a raw
     // substring would also match a half-applied write.
+    // The file carries the UNIFIED `links` (projectToFile writes the new shape only); the bridge
+    // is a context Link whose endpoints are node refs.
+    const fileBridge = (file: { links?: unknown }) =>
+      ((file.links ?? []) as Array<{ id: string; kind: string; source: { ref: string; nodeId: string }; target: { ref: string; nodeId: string } }>)
+        .some((l) => l.id === 'bridge-e2e' && l.kind === 'context')
     const flushed = await projectFileWhen(
       'the authority writes the shared project',
       sharedCwd,
       (_raw, file) =>
-        !!file.bridges?.some((b) => b.id === 'bridge-e2e') &&
+        fileBridge(file) &&
         positionOf(file.nodes, LIVE)?.x === 321 &&
         !!file.kanban?.assignments.some((a) => a.nodeId === LIVE && a.columnId === column2),
       STEP_MS
     )
     expect(positionOf(flushed.nodes, LIVE)).toEqual({ x: 321, y: 0 })
-    expect(flushed.bridges).toContainEqual({ id: 'bridge-e2e', source: LIVE, target: IDLE })
+    expect(
+      ((flushed.links ?? []) as Array<{ id: string; kind: string; source: { ref: 'node'; nodeId: string }; target: { ref: 'node'; nodeId: string } }>)
+        .filter((l) => l.kind === 'context')
+        .map((l) => ({ id: l.id, source: l.source.nodeId, target: l.target.nodeId }))
+    ).toContainEqual({ id: 'bridge-e2e', source: LIVE, target: IDLE })
     // The card, in the SECOND column of the project's lazy default board (seeded, so every client
     // and the authority name the same three columns).
     expect(flushed.kanban?.columns.map((c) => c.id)[1]).toBe(column2)
@@ -665,10 +674,11 @@ describe.skipIf(process.platform === 'win32')('hosted team relay, end to end on 
     // authority adopts it and publishes the difference as canvas ops; the whole-project
     // `workspace:external-change` (and the conflict bar it raises on a dirty canvas) is NOT sent for
     // a governed project.
+    // The file carries the unified `links`; the pull's removal drops the context Link.
     const pulled: ProjectFileV1 = {
       ...afterMarker,
       rev: afterMarker.rev + 1,
-      bridges: (afterMarker.bridges ?? []).filter((b) => b.id !== 'bridge-e2e')
+      links: (afterMarker.links ?? []).filter((l) => l.id !== 'bridge-e2e')
     }
     const framesBeforePull = owner.frames.length
     await writeFileAtomic(projectFilePath(sharedCwd), `${JSON.stringify(pulled, null, 2)}\n`)

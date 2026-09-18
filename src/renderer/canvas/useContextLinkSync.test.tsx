@@ -6,16 +6,22 @@ import * as linkMaps from '@shared/context-link-map'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useContextLinkSync, type LiveContextLinks } from './useContextLinkSync'
-import type { CanvasNodeState, Project } from '@shared/types'
+import type { CanvasNodeState, Link, Project } from '@shared/types'
 
 vi.mock('../session/session', () => ({
   sessionForProject: (id: string) => ({ api: id === 'relay' ? {} : window.nodeTerminal })
 }))
 const setLinks = vi.fn(async (_map: unknown) => {})
 const edge = (source: string, target: string) => ({ id: `${source}-${target}`, source, target })
+const contextLink = (source: string, target: string): Link => ({
+  id: `${source}-${target}`,
+  kind: 'context',
+  source: { ref: 'node', nodeId: source },
+  target: { ref: 'node', nodeId: target }
+})
 const node = (id: string): LiveContextLinks['nodes'][number] => ({ id, type: 'terminal', data: { title: id, agentId: 'codex' } })
-const project = (id: string, ids: string[], bridges = ids.length > 1 ? [edge(ids[0], ids[1])] : []): Project => ({
-  id, nodes: ids.map((id) => ({ id, kind: 'terminal', title: id, agentId: 'codex' } as CanvasNodeState)), bridges
+const project = (id: string, ids: string[], links = ids.length > 1 ? [contextLink(ids[0], ids[1])] : []): Project => ({
+  id, nodes: ids.map((id) => ({ id, kind: 'terminal', title: id, agentId: 'codex' } as CanvasNodeState)), links
 } as Project)
 let root: Root
 function Harness(props: LiveContextLinks) { useContextLinkSync(props); return null }
