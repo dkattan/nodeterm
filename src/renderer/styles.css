@@ -6590,8 +6590,8 @@ body,
   padding: 1px 6px;
   border-radius: 8px;
   font-size: 10.5px;
-  background: rgba(255, 159, 10, 0.18);
-  color: #ffb340;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
   vertical-align: 1px;
 }
 
@@ -6668,11 +6668,11 @@ body,
 }
 
 .model-switch-progress__row--ok .model-switch-progress__marker {
-  color: #30d158;
+  color: var(--success);
 }
 
 .model-switch-progress__row--failed .model-switch-progress__marker {
-  color: #ff453a;
+  color: var(--danger);
 }
 
 .model-switch-progress__row--running .ui-spinner {

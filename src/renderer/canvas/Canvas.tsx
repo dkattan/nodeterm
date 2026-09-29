@@ -3977,11 +3977,13 @@ export function Canvas() {
           }
         },
         retryAll: (): void => {
+          const repair = modelSwitchRepairRef.current
           const retryable = unasked.filter((x) => failedRowIds().includes(x.id))
-          modelRespawnTrace('retry.all', {
+          modelRespawnTrace('retry.all-clicked', {
             run: progressRun,
             rowCount: retryable.length,
-            sweepRunning: repairSweepRunning
+            sweepRunning: repairSweepRunning,
+            controllerAvailable: !!repair
           })
           if (repairSweepRunning || !retryable.length) return
           repairSweepRunning = true
