@@ -43,11 +43,28 @@ describe('opencode plugin against the real endpoint-file writer', () => {
     const file = path.join(tmp, 'plugin-live.mjs')
     fs.writeFileSync(file, buildOpencodePlugin())
     const mod = await import(/* @vite-ignore */ `file://${file}`)
-    const hooks = await mod.NodetermStatus()
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_live' } } })
+    // Drive setup() the way the opencode v2 loader does: ctx.event.subscribe() yields
+    // decoded bus events { type, properties }.
+    const queue: Array<{ type: string; properties: Record<string, unknown> }> = []
+    let wake: (() => void) | null = null
+    const cleanup = await mod.default.setup({
+      event: {
+        subscribe: async function* () {
+          while (true) {
+            while (queue.length > 0) yield queue.shift()
+            await new Promise<void>((r) => (wake = r))
+          }
+        }
+      }
+    })
+    queue.push({ type: 'session.idle', properties: { sessionID: 'ses_live' } })
+    const w = wake as (() => void) | null
+    wake = null
+    w?.()
 
     // The listener fires only for an ACCEPTED post — a quote-mangled token is 401'd before it.
     await vi.waitFor(() => expect(events.length).toBeGreaterThan(0))
     expect(events[0].nodeId).toBe('node-oc-live')
+    cleanup()
   })
 })

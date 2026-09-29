@@ -29,6 +29,39 @@ afterEach(() => {
 
 const planted = () => path.join(tmp, '.config', 'opencode', 'plugins', 'nodeterm-status.js')
 
+// Drives the generated v2 plugin the way the opencode loader does: setup(ctx) receives
+// ctx.event.subscribe() — an async iterator of decoded bus events { type, properties }.
+// The fake bus queues events; push() releases them and waits out the subscription's
+// microtasks (post() dispatches synchronously into the stubbed fetch once handle() runs).
+async function installAndRunPlugin(
+  prefix: string
+): Promise<{ push: (ev: unknown) => Promise<void>; cleanup: () => void }> {
+  const queue: unknown[] = []
+  let wake: (() => void) | null = null
+  const ctx = {
+    event: {
+      subscribe: async function* () {
+        while (true) {
+          while (queue.length > 0) yield queue.shift()
+          await new Promise<void>((r) => (wake = r))
+        }
+      }
+    }
+  }
+  const file = path.join(tmp, `${prefix}-${Math.random().toString(36).slice(2)}.mjs`)
+  fs.writeFileSync(file, buildOpencodePlugin())
+  const mod = await import(/* @vite-ignore */ `file://${file}`)
+  const cleanup = await mod.default.setup(ctx)
+  const push = async (ev: unknown) => {
+    queue.push(ev)
+    const w = wake
+    wake = null
+    w?.()
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  return { push, cleanup }
+}
+
 describe('opencode plugin install', () => {
   it('writes the marker-bearing plugin file (idempotent)', () => {
     installOpencodeHooks()
@@ -55,19 +88,30 @@ describe('opencode plugin install', () => {
   })
   it('generated plugin is env-gated and fail-open', () => {
     const body = buildOpencodePlugin()
-    expect(body).toContain('return {}') // missing env → no-op
+    expect(body).toContain('export default') // v2 loader schema: { default: { id, setup } }
+    expect(body).toContain("id: 'nodeterm.status'")
+    expect(body).toContain('if (!nodeId) return') // missing env → no-op
     expect(body).toContain('catch') // POSTs never throw into opencode
+  })
+  it('refreshes a stale marker-owned plugin file in place', () => {
+    installOpencodeHooks()
+    // A planted file from an older generator (e.g. the V1 format opencode 2.x rejects).
+    fs.writeFileSync(planted(), PLUGIN_MARKER + '\nexport const NodetermStatus = async () => ({})\n')
+    installOpencodeHooks()
+    const body = fs.readFileSync(planted(), 'utf8')
+    expect(body).toContain("id: 'nodeterm.status'")
   })
 })
 
-// Execute the generated plugin body against SDK-shaped inputs. opencode delivers bus
-// events (session.created/idle/error, message.updated, permission.*) ONLY through the
-// `event` catch-all hook — a hook keyed by the event name itself is never called (the
-// original bug: every handler was dead, so no status ever reached the hook server).
+// Execute the generated plugin body against bus-shaped inputs. opencode v2 delivers bus
+// events (session.created/idle/error, message.updated, permission.*, tool.execute.before)
+// through setup()'s ctx.event.subscribe() — the V1 named-export hook style is rejected by
+// the loader schema (the original bug: the plugin never loaded, so no status ever reached
+// the hook server).
 describe('generated plugin behavior (executed)', () => {
   let posts: Array<{ url: string; payload: Record<string, unknown>; nodeId: string }>
 
-  async function loadHooks(): Promise<Record<string, (input: unknown) => Promise<void>>> {
+  beforeEach(() => {
     posts = []
     vi.stubGlobal('fetch', (url: string, init: { body: string }) => {
       const params = new URLSearchParams(init.body)
@@ -85,44 +129,41 @@ describe('generated plugin behavior (executed)', () => {
     // A developer may be running this test from a live nodeterm PTY. Never let the
     // generated plugin inherit that session's socket and post test events to it.
     vi.stubEnv('NODETERM_HOOK_SOCK', '')
-    const file = path.join(tmp, `plugin-under-test-${Math.random().toString(36).slice(2)}.mjs`)
-    fs.writeFileSync(file, buildOpencodePlugin())
-    const mod = await import(/* @vite-ignore */ `file://${file}`)
-    return mod.NodetermStatus()
-  }
+  })
 
   afterEach(() => {
     vi.unstubAllEnvs()
     vi.unstubAllGlobals()
   })
 
-  it('forwards bus events through the `event` catch-all with the wire-contract names', async () => {
-    const hooks = await loadHooks()
-    expect(typeof hooks.event).toBe('function')
+  it('forwards bus events with the wire-contract names', async () => {
+    const { push } = await installAndRunPlugin('plugin-under-test')
 
-    await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_1' } } } })
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
-    await hooks.event({ event: { type: 'session.error', properties: { sessionID: 'ses_1' } } })
-    await hooks.event({ event: { type: 'permission.updated', properties: { id: 'perm1', sessionID: 'ses_1' } } })
-    await hooks.event({
-      event: { type: 'permission.replied', properties: { sessionID: 'ses_1', permissionID: 'perm1', response: 'once' } }
+    await push({ type: 'session.created', properties: { info: { id: 'ses_1' } } })
+    await push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
+    await push({ type: 'session.error', properties: { sessionID: 'ses_1' } })
+    // 1.x spelled it permission.updated; v2 renamed the bus event to permission.asked —
+    // both must post the wire name.
+    await push({ type: 'permission.updated', properties: { id: 'perm1', sessionID: 'ses_1' } })
+    await push({ type: 'permission.asked', properties: { id: 'perm2', sessionID: 'ses_1' } })
+    await push({
+      type: 'permission.replied',
+      properties: { sessionID: 'ses_1', permissionID: 'perm2', response: 'once' }
     })
     // The question (elicitation) flow, measured on 1.18.3: the TUI dialog blocks the turn
     // but the session never goes idle, so without these the badge sat on RUNNING.
-    await hooks.event({
-      event: { type: 'question.asked', properties: { id: 'que_1', sessionID: 'ses_1', questions: [] } }
+    await push({ type: 'question.asked', properties: { id: 'que_1', sessionID: 'ses_1', questions: [] } })
+    await push({
+      type: 'question.replied',
+      properties: { sessionID: 'ses_1', requestID: 'que_1', answers: [['Red']] }
     })
-    await hooks.event({
-      event: { type: 'question.replied', properties: { sessionID: 'ses_1', requestID: 'que_1', answers: [['Red']] } }
-    })
-    await hooks.event({
-      event: { type: 'question.rejected', properties: { sessionID: 'ses_1', requestID: 'que_1' } }
-    })
+    await push({ type: 'question.rejected', properties: { sessionID: 'ses_1', requestID: 'que_1' } })
 
     expect(posts.map((p) => p.payload)).toEqual([
       { event: 'session.created', sessionID: 'ses_1' },
       { event: 'session.idle', sessionID: 'ses_1' },
       { event: 'session.error', sessionID: 'ses_1' },
+      { event: 'permission.asked', sessionID: 'ses_1' },
       { event: 'permission.asked', sessionID: 'ses_1' },
       { event: 'permission.replied', sessionID: 'ses_1' },
       { event: 'question.asked', sessionID: 'ses_1' },
@@ -134,12 +175,11 @@ describe('generated plugin behavior (executed)', () => {
   })
 
   it('forwards message.updated only for user messages (turn start)', async () => {
-    const hooks = await loadHooks()
-    await hooks.event({
-      event: { type: 'message.updated', properties: { info: { id: 'm1', sessionID: 'ses_1', role: 'user' } } }
-    })
-    await hooks.event({
-      event: { type: 'message.updated', properties: { info: { id: 'm2', sessionID: 'ses_1', role: 'assistant' } } }
+    const { push } = await installAndRunPlugin('plugin-under-test')
+    await push({ type: 'message.updated', properties: { info: { id: 'm1', sessionID: 'ses_1', role: 'user' } } })
+    await push({
+      type: 'message.updated',
+      properties: { info: { id: 'm2', sessionID: 'ses_1', role: 'assistant' } }
     })
     expect(posts.map((p) => p.payload)).toEqual([{ event: 'message.updated', sessionID: 'ses_1', role: 'user' }])
   })
@@ -149,15 +189,16 @@ describe('generated plugin behavior (executed)', () => {
     // turn start (created → completed) and AFTER session.idle (title/bookkeeping touch).
     // Each re-forward became working+newTurn, which bypasses the done-holdoff by design —
     // so the node bounced back to RUNNING right after done and stuck there forever.
-    const hooks = await loadHooks()
+    const { push } = await installAndRunPlugin('plugin-under-test')
     const user = (id: string) => ({
-      event: { type: 'message.updated', properties: { info: { id, sessionID: 'ses_1', role: 'user' } } }
+      type: 'message.updated',
+      properties: { info: { id, sessionID: 'ses_1', role: 'user' } }
     })
-    await hooks.event(user('m1'))
-    await hooks.event(user('m1')) // turn-start double fire
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
-    await hooks.event(user('m1')) // post-idle bookkeeping touch — must NOT resurrect the turn
-    await hooks.event(user('m2')) // a genuinely new prompt still counts
+    await push(user('m1'))
+    await push(user('m1')) // turn-start double fire
+    await push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
+    await push(user('m1')) // post-idle bookkeeping touch — must NOT resurrect the turn
+    await push(user('m2')) // a genuinely new prompt still counts
     expect(posts.map((p) => p.payload)).toEqual([
       { event: 'message.updated', sessionID: 'ses_1', role: 'user' },
       { event: 'session.idle', sessionID: 'ses_1' },
@@ -166,15 +207,15 @@ describe('generated plugin behavior (executed)', () => {
   })
 
   it('ignores unrelated bus events (token-stream deltas never reach the hook server)', async () => {
-    const hooks = await loadHooks()
-    await hooks.event({ event: { type: 'message.part.delta', properties: {} } })
-    await hooks.event({ event: { type: 'session.updated', properties: { info: { id: 'ses_1' } } } })
+    const { push } = await installAndRunPlugin('plugin-under-test')
+    await push({ type: 'message.part.delta', properties: {} })
+    await push({ type: 'session.updated', properties: { info: { id: 'ses_1' } } })
     expect(posts).toEqual([])
   })
 
-  it('posts tool.execute.before from the real plugin hook of that name', async () => {
-    const hooks = await loadHooks()
-    await hooks['tool.execute.before']({ tool: 'bash', sessionID: 'ses_1', callID: 'c1' })
+  it('forwards tool.execute.before from the v2 bus event of that name', async () => {
+    const { push } = await installAndRunPlugin('plugin-under-test')
+    await push({ type: 'tool.execute.before', properties: { tool: 'bash', sessionID: 'ses_1', callID: 'c1' } })
     expect(posts.map((p) => p.payload)).toEqual([{ event: 'tool.execute.before', sessionID: 'ses_1' }])
   })
 })
@@ -195,11 +236,8 @@ describe('generated plugin unix-socket transport', () => {
     fs.rmSync(sockDir, { recursive: true, force: true })
   })
 
-  async function importPlugin(): Promise<Record<string, (input: unknown) => Promise<void>>> {
-    const file = path.join(tmp, `plugin-sock-${Math.random().toString(36).slice(2)}.mjs`)
-    fs.writeFileSync(file, buildOpencodePlugin())
-    const mod = await import(/* @vite-ignore */ `file://${file}`)
-    return mod.NodetermStatus()
+  async function importPlugin(): Promise<{ push: (ev: unknown) => Promise<void>; cleanup: () => void }> {
+    return installAndRunPlugin('plugin-sock')
   }
 
   it('posts over the unix socket via node:http when NODETERM_HOOK_SOCK is set (no port)', async () => {
@@ -221,8 +259,8 @@ describe('generated plugin unix-socket transport', () => {
       vi.stubEnv('NODETERM_HOOK_TOKEN', 'socktok')
       vi.stubEnv('NODETERM_HOOK_PORT', '')
       vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
-      const hooks = await importPlugin()
-      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+      const { push } = await importPlugin()
+      await push({ type: 'session.idle', properties: { sessionID: 'ses_ssh' } })
       await vi.waitFor(() => expect(received.length).toBe(1))
       expect(received[0].url).toBe('/hook/opencode')
       expect(received[0].token).toBe('socktok')
@@ -257,7 +295,7 @@ describe('generated plugin unix-socket transport', () => {
       vi.stubEnv('NODETERM_HOOK_TOKEN', 'stale')
       vi.stubEnv('NODETERM_HOOK_SOCK', '')
       const hooks = await importPlugin()
-      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+      await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_ssh' } })
       await vi.waitFor(() => expect(received.length).toBe(1))
       expect(tcpFetch).not.toHaveBeenCalled()
     } finally {
@@ -278,7 +316,7 @@ describe('generated plugin unix-socket transport', () => {
     vi.stubEnv('NODETERM_HOOK_PORT', '')
     vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
     const hooks = await importPlugin()
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+    await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_ssh' } })
     expect(calls.length).toBe(1)
     expect(calls[0].url).toBe('http://localhost/hook/opencode')
     expect(calls[0].init.unix).toBe('/tmp/some.sock')
@@ -305,11 +343,8 @@ describe('generated plugin presents the per-node token', () => {
     fs.rmSync(sockDir, { recursive: true, force: true })
   })
 
-  async function importPlugin(): Promise<Record<string, (input: unknown) => Promise<void>>> {
-    const file = path.join(tmp, `plugin-token-${Math.random().toString(36).slice(2)}.mjs`)
-    fs.writeFileSync(file, buildOpencodePlugin())
-    const mod = await import(/* @vite-ignore */ `file://${file}`)
-    return mod.NodetermStatus()
+  async function importPlugin(): Promise<{ push: (ev: unknown) => Promise<void>; cleanup: () => void }> {
+    return installAndRunPlugin('plugin-token')
   }
 
   /** Fires one event over the plain TCP `fetch` path and returns the headers it sent. */
@@ -326,7 +361,7 @@ describe('generated plugin presents the per-node token', () => {
     vi.stubEnv('NODETERM_HOOK_SOCK', '')
     for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v)
     const hooks = await importPlugin()
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
     expect(calls.length).toBe(1)
     return calls[0]
   }
@@ -376,7 +411,7 @@ describe('generated plugin presents the per-node token', () => {
     vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
     vi.stubEnv('NODETERM_NODE_TOKEN_DIR', tokenDir)
     const hooks = await importPlugin()
-    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
     expect(calls.length).toBe(1)
     expect((calls[0].init.headers as Record<string, string>)['x-nodeterm-node-token']).toBe(
       'OPENCODE-NODE-TOKEN'
@@ -403,7 +438,7 @@ describe('generated plugin presents the per-node token', () => {
       vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
       vi.stubEnv('NODETERM_NODE_TOKEN_DIR', tokenDir)
       const hooks = await importPlugin()
-      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+      await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
       await vi.waitFor(() => expect(received.length).toBe(1))
       expect(received[0]).toBe('OPENCODE-NODE-TOKEN')
     } finally {
@@ -431,7 +466,7 @@ describe('generated plugin presents the per-node token', () => {
       vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
       vi.stubEnv('NODETERM_NODE_TOKEN_DIR', path.join(tokenDir, 'nope'))
       const hooks = await importPlugin()
-      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+      await hooks.push({ type: 'session.idle', properties: { sessionID: 'ses_1' } })
       await vi.waitFor(() => expect(received.length).toBe(1))
       expect(received[0]).toBe('')
     } finally {
