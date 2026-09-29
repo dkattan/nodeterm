@@ -737,6 +737,8 @@ export type AgentRestartFn = (
   // since `terminateForeground` is PID-safe — no `/exit` typed into a dialog) and recycles the same
   // way a model switch does, because tmux env changes do not retroactively change an existing shell.
   clearEnv?: boolean,
+  /** Optional fresh eligibility check, also called immediately before termination. */
+  shouldRestart?: () => boolean,
   // Only with `restartShell`: runs AFTER the CLI has exited and BEFORE the pane is recycled — the
   // one moment the conversation's transcript is final and nothing is writing it. The account switch
   // copies the transcript into the target account here and rebinds the node, so the recycle's

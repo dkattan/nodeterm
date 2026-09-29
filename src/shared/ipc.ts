@@ -171,7 +171,7 @@ export const IPC = {
   canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   agentSubagentSnapshot: 'agent:subagent-snapshot',
-  /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
+  agentStatusHistory: 'agent:status-history',  /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */
   agentAnswerPermission: 'agent:answer-permission',

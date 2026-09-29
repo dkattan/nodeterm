@@ -221,14 +221,8 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     liveTmuxSessions.clear()
     paneProcessReply = ''
     processGroupReply = ''
-<<<<<<< New base: feat(terminal): inspect session environment
-    userDataDir = testTmpDir('nt-solo-')
-||||||| Common ancestor
-    userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-solo-'))
-=======
     tmuxEnvironmentReply = ''
-    userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-solo-'))
->>>>>>> Current commit: fix(terminal): preserve environment source accuracy
+    userDataDir = testTmpDir('nt-solo-')
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
     vi.useFakeTimers()
@@ -720,11 +714,11 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       m.registerIpc()
       const models = [
         { id: 'anthropic/claude-opus-5', contextWindow: 1_000_000 },
-        { id: 'vllm/custom-model', contextWindow: 333_000 }
+        { id: 'provider/custom-model', contextWindow: 333_000 }
       ]
 
       m.setGatewayModels(gatewayScope(gateway, storedSecret), models)
-      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(333_000)
       await create(80, 24, 'scope-stored-old', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
@@ -734,7 +728,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(200_000)
 
       process.env.NODETERM_TEST_GATEWAY_KEY = 'env-old'
       gateway = {
@@ -742,7 +736,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         apiKey: '${env:NODETERM_TEST_GATEWAY_KEY}'
       }
       m.setGatewayModels(gatewayScope(gateway, null, process.env), models)
-      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(333_000)
       await create(80, 24, 'scope-env-old', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
@@ -752,7 +746,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(200_000)
 
       gateway = {
         baseUrl: 'https://bifrost.example.test',
@@ -760,13 +754,13 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         discoveryPath: '/v1/models'
       }
       m.setGatewayModels(gatewayScope(gateway), models)
-      expect(cachedWindowFor('vllm/custom-model')).toBe(333_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(333_000)
       gateway = { ...gateway, discoveryPath: '/openai/v1/models' }
       await create(80, 24, 'scope-path-new', {
         agentId: 'claude', agentModel: 'anthropic/claude-opus-5'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-      expect(cachedWindowFor('vllm/custom-model')).toBe(200_000)
+      expect(cachedWindowFor('provider/custom-model')).toBe(200_000)
     } finally {
       if (savedEnv === undefined) delete process.env.NODETERM_TEST_GATEWAY_KEY
       else process.env.NODETERM_TEST_GATEWAY_KEY = savedEnv
@@ -774,7 +768,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     }
   })
 
-  it('sets no autocompact env for a claude model at or below the threshold, or unknown to discovery', async () => {
+  it('bounds small parent/subagent windows without guessing unknown discovery', async () => {
     // The host this suite runs on may itself export the autocompact vars (a nodeterm-under-Claude
     // dev shell). Scrub them so "not injected" reads as undefined, not as the inherited value.
     const saved = saveAndScrubAutocompactEnv()
@@ -793,11 +787,11 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
 
       // At the threshold (200k) — not above it.
       await create(80, 24, 'autocompact-claude-200k', { agentId: 'claude', agentModel: 'anthropic/claude-sonnet-5' })
-      expect(spawnArgs[0].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-      expect(spawnArgs[0].env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBeUndefined()
+      expect(spawnArgs[0].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000')
+      expect(spawnArgs[0].env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe('80')
       // Below the threshold.
       await create(80, 24, 'autocompact-claude-100k', { agentId: 'claude', agentModel: 'anthropic/claude-haiku-5' })
-      expect(spawnArgs[1].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(spawnArgs[1].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('100000')
       // Unknown to discovery — never guessed.
       await create(80, 24, 'autocompact-claude-unknown', { agentId: 'claude', agentModel: 'anthropic/claude-future' })
       expect(spawnArgs[2].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
@@ -857,40 +851,68 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     }
   })
 
-  it('routes Claude subagents through a served model regardless of the parent window size', async () => {
+  it('applies explicit Claude subagent policies at the actual spawn boundary', async () => {
     const saved = saveAndScrubAutocompactEnv()
     try {
       const { PtyManager } = await import('./pty-manager')
       let settings = {
         ...DEFAULT_SETTINGS,
-        modelGatewayDefaultModel: 'vllm/zeta',
+        modelGatewayDefaultModel: 'provider/zeta',
+        claudeSubagents: { mode: 'parent', force: true } as import('../shared/agents/model-gateway').ClaudeSubagentSettings,
         modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-gateway' }
       }
       const m = new PtyManager()
       m.init(() => settings)
       m.registerIpc()
       m.setGatewayModels(gatewayScope(settings.modelGateway), [
-        { id: 'vllm/zeta', contextWindow: 200_000 },
+        { id: 'provider/zeta', contextWindow: 200_000 },
         { id: 'anthropic/alpha' }
       ])
 
       await create(80, 24, 'subagent-default', {
         agentId: 'claude',
-        agentModel: 'vllm/zeta'
+        agentModel: 'provider/zeta'
       })
-      expect(spawnArgs.at(-1)?.env).toMatchObject({
-        CLAUDE_CODE_SUBAGENT_MODEL: 'vllm/zeta',
-        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
-        CLAUDE_CODE_EFFORT_LEVEL: 'xhigh'
-      })
-      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBe('1')
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000')
 
-      settings = { ...settings, modelGatewayDefaultModel: 'missing' }
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+      settings = { ...settings, modelGatewayDefaultModel: 'missing', claudeSubagents: { mode: 'model', model: 'anthropic/alpha', force: false } }
+      process.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1'
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = 'xhigh'
       await create(80, 24, 'subagent-fallback', {
         agentId: 'claude',
-        agentModel: 'vllm/zeta'
+        agentModel: 'provider/zeta'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('anthropic/alpha')
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBeUndefined()
+      expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
+
+      m.setGatewayModels(gatewayScope(settings.modelGateway), [
+        { id: 'provider/long-model', contextWindow: 400_000 },
+        { id: 'provider/compact-model', contextWindow: 131_072 }
+      ])
+      settings = { ...settings, claudeSubagents: { mode: 'model', model: 'provider/compact-model', force: true } }
+      await create(80, 24, 'subagent-smaller-window', { agentId: 'claude', agentModel: 'provider/long-model' })
+      expect(spawnArgs.at(-1)?.env).toMatchObject({
+        CLAUDE_CODE_SUBAGENT_MODEL: 'provider/compact-model', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '131072',
+        CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '80'
+      })
+      settings = { ...settings, claudeSubagents: { mode: 'model', model: 'provider/long-model', force: true } }
+      await create(80, 24, 'subagent-larger-window', { agentId: 'claude', agentModel: 'provider/compact-model' })
+      expect(spawnArgs.at(-1)?.env).toMatchObject({
+        CLAUDE_CODE_SUBAGENT_MODEL: 'provider/long-model[1m]', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '131072'
+      })
+
+      settings = { ...settings, claudeSubagents: { mode: 'claude', force: true } }
+      process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'stale'
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = 'low'
+      await create(80, 24, 'subagent-cli-choice', { agentId: 'claude' })
+      for (const key of ['CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'CLAUDE_CODE_EFFORT_LEVEL']) {
+        expect(spawnArgs.at(-1)?.env[key]).toBeUndefined()
+        delete process.env[key]
+      }
 
       for (const agentId of ['codex', undefined]) {
         await create(80, 24, `subagent-non-claude-${agentId ?? 'terminal'}`, { agentId })
@@ -901,12 +923,12 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
 
       settings = { ...settings, agentLaunchMode: 'subscription' }
       // A restart must also remove values inherited from a gateway-backed parent shell.
-      process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'vllm/zeta'
+      process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'provider/zeta'
       process.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1'
       process.env.CLAUDE_CODE_EFFORT_LEVEL = 'medium'
       await create(80, 24, 'subagent-subscription', {
         agentId: 'claude',
-        agentModel: 'vllm/zeta'
+        agentModel: 'provider/zeta'
       })
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
       expect(spawnArgs.at(-1)?.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBeUndefined()

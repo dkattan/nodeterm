@@ -176,6 +176,7 @@ import {
 } from '../terminal/wake-identity'
 import {
   agentHibernateFns,
+  assembleWakeResumeCommand,
   exitSequence,
   guardConcurrentRestart,
   isShellCommand,
@@ -4538,10 +4539,15 @@ export function TerminalNode({
         // harness PID is still live in the foreground group, SIGTERMs that group, and this shared
         // phase waits until the pane is a shell before any recycle/resume follows. The target may
         // be a same-base variant, but it is not running yet — identity must always name `source`.
-        const terminateSourceForeground = (): Promise<TerminateForegroundOutcome> =>
-          sourceAgentId
+        const terminateSourceForeground = (): Promise<TerminateForegroundOutcome> => {
+          if (shouldRestart && !shouldRestart()) {
+            refuse('working')
+            return Promise.resolve('refused')
+          }
+          return sourceAgentId
             ? api.pty.terminateForeground(id, sourceAgentId)
             : Promise.resolve('refused')
+        }
         const stoppedAtShell = (
           outcome: ExitPhaseOutcome
         ): outcome is 'exited' | 'already-exited' =>
@@ -5040,17 +5046,18 @@ export function TerminalNode({
         // Same warm-up as the cold-restore and restart paths: the override read inside the builder
         // is synchronous, and a wake can be the first launch after a boot. Bounded, never rejects.
         const ownerProjectId = await warmOwningProjectId()
-        const { command } = assembleResumeCommand(
+        const nodeData = getNode(id)?.data
+        const { command } = assembleWakeResumeCommand(
           {
             agentId,
             customAgent,
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
             approvalCaps: await ensureCodexLaunchCaps(
-                capabilityAgentId(agentId),
-                data.ssh || data.sshRemoteTmux || session.source === 'relay'
-              ),
-            sharedIdentity: false,
+              capabilityAgentId(agentId),
+              data.ssh || data.sshRemoteTmux || session.source === 'relay'
+            ),
+            model: (nodeData?.agentLaunchModel ?? nodeData?.agentModel) as string | undefined,
             models: useModelGateway.getState().models,
             // The launch-command override lives on the user's own PATH (or is an absolute path),
             // not in a generated launcher dir, so it rides the wake too — project layer included.

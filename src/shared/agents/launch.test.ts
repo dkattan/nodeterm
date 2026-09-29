@@ -10,7 +10,7 @@ const ENV = { MY_MODEL: 'sonnet', MY_TOKEN: 'sk-abc' }
 const claudeProxy: CustomAgent = {
   id: 'custom:proxy',
   label: 'Claude (proxy)',
-  launchCmd: 'claude-wopr',
+  launchCmd: 'claude-proxy',
   baseAgent: 'claude',
   args: '--model ${env:MY_MODEL}'
 }
@@ -241,7 +241,7 @@ describe('assembleLaunchCommand — custom agents', () => {
       ENV
     )
     // args are expanded + each token quoted; flags appended like claude.
-    expect(r.command).toBe("claude-wopr '--model' 'sonnet' 'fix' --permission-mode auto --session-id s1")
+    expect(r.command).toBe("claude-proxy '--model' 'sonnet' 'fix' --permission-mode auto --session-id s1")
     expect(r.missingEnv).toEqual([])
   })
   it('a claude-base agent with a stale flag-prompt emits a POSITIONAL, not --prompt', () => {
@@ -251,7 +251,7 @@ describe('assembleLaunchCommand — custom agents', () => {
     const stale: CustomAgent = {
       id: 'custom:stale',
       label: 'Stale',
-      launchCmd: 'claude-wopr',
+      launchCmd: 'claude-proxy',
       baseAgent: 'claude',
       promptInjectionMode: 'flag-prompt'
     }
@@ -273,7 +273,7 @@ describe('assembleLaunchCommand — custom agents', () => {
         },
         ENV
       ).command
-    ).toBe("claude-wopr --model 'anthropic/claude-opus'")
+    ).toBe("claude-proxy --model 'anthropic/claude-opus'")
   })
   it('expands ${env:…} in args and reports missing vars', () => {
     setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
@@ -319,7 +319,7 @@ describe('assembleResumeCommand', () => {
         { agentId: 'custom:proxy', customAgent: claudeProxy, sessionId: 'abc-123', permissionMode: 'plan' },
         ENV
       ).command
-    ).toBe("claude-wopr '--model' 'sonnet' --resume abc-123 --permission-mode plan")
+    ).toBe("claude-proxy '--model' 'sonnet' --resume abc-123 --permission-mode plan")
   })
   it('a non-resumable vanilla custom agent falls back to its bare launch command', () => {
     expect(
@@ -332,7 +332,7 @@ describe('quoting by construction — env values can never become shell syntax o
   const proxyWith = (args: string): CustomAgent => ({
     id: 'custom:proxy',
     label: 'Proxy',
-    launchCmd: 'claude-wopr',
+    launchCmd: 'claude-proxy',
     baseAgent: 'claude',
     args
   })
@@ -342,7 +342,7 @@ describe('quoting by construction — env values can never become shell syntax o
       { agentId: 'custom:aider', customAgent: proxyWith('--model ${env:SPACED}') },
       { SPACED: 'two words' }
     )
-    expect(command).toBe("claude-wopr '--model' 'two words'")
+    expect(command).toBe("claude-proxy '--model' 'two words'")
   })
 
   it('a value carrying `;`, backticks, and $() reaches the shell as ONE literal argument', () => {
@@ -353,7 +353,7 @@ describe('quoting by construction — env values can never become shell syntax o
     )
     // Exactly one argv token after --model: the whole hostile string, single-quoted. Nothing in it
     // can smuggle a flag (it is one argument) or read as syntax (it is quoted).
-    expect(command).toBe(`claude-wopr '--model' '${hostile}'`)
+    expect(command).toBe(`claude-proxy '--model' '${hostile}'`)
     // The byte-equality above IS the proof: the entire hostile string sits inside one pair of
     // single quotes (it contains no quote of its own to break out with), so the flag it carries
     // is data inside --model's value, not a fourth argv token.
@@ -413,7 +413,7 @@ describe('quoting by construction — env values can never become shell syntax o
       { agentId: 'custom:aider', customAgent: proxyWith('--model ${env:GONE} --verbose') },
       {}
     )
-    expect(command).toBe("claude-wopr '--model' '--verbose'")
+    expect(command).toBe("claude-proxy '--model' '--verbose'")
     expect(missingEnv).toEqual(['GONE'])
   })
 })
@@ -582,13 +582,13 @@ describe('autocompact [1m] model-id suffix — applied at assembly from discover
   })
 
   it('leaves an already-suffixed id alone (no double [1m])', () => {
-    const withSuffix = [{ id: 'vllm/GLM-5.2-NVFP4-MTP[1m]', contextWindow: 1_000_000 }]
+    const withSuffix = [{ id: 'provider/previous-model[1m]', contextWindow: 1_000_000 }]
     expect(
       assembleLaunchCommand(
-        { agentId: 'claude', model: 'vllm/GLM-5.2-NVFP4-MTP[1m]', models: withSuffix },
+        { agentId: 'claude', model: 'provider/previous-model[1m]', models: withSuffix },
         ENV
       ).command
-    ).toBe("claude --model 'vllm/GLM-5.2-NVFP4-MTP[1m]'")
+    ).toBe("claude --model 'provider/previous-model[1m]'")
   })
 
   it('fails open with no discovery list — the id is used unchanged', () => {

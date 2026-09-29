@@ -46,6 +46,14 @@ if (typeof window !== 'undefined') {
   })
 }
 
+/** Persist before an action that respawns a process and reads settings in the core. */
+export async function flushSettingsSave(): Promise<void> {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = null
+  pendingSave = null
+  await window.nodeTerminal.settings.save(useSettings.getState().settings)
+}
+
 export const useSettings = create<SettingsState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   hydrated: false,

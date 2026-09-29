@@ -22,7 +22,7 @@ export interface SessionRowProps {
   onContextMenu(e: React.MouseEvent): void
   onDragStart(): void
   onDragEnd(): void
-  /** Status-group mode only: elapsed time since the current state began. */
+  /** Status-group mode only: elapsed time since the last reported agent update. */
   stateAgeLabel?: string
   /** The session this row's PROJECT belongs to (`projectSessionSource`): only a local one shows
    *  this machine's LIVE chip — a relay tab's node with the same id is not ours (R57). */
@@ -218,9 +218,15 @@ export function SessionRow({
             {stateAgeLabel && (
               <span
                 className={`ss-meta__state-age${row.statusClock === 'restored' ? ' ss-meta__state-age--restored' : ''}`}
-                title={sessionStateAgeTitle(stateAgeLabel, row.statusClock, row.lastSeenState)}
+                title={row.statusClock
+                  ? sessionStateAgeTitle(stateAgeLabel, row.statusClock, row.lastSeenState)
+                  : row.historicalStateLabel
+                    ? `${row.historicalStateLabel} ${stateAgeLabel}; current activity has not been reported`
+                    : `Last agent update ${stateAgeLabel}`}
               >
-                {stateAgeLabel}
+                {row.historicalStateLabel && !row.statusClock
+                  ? `${row.historicalStateLabel} · ${stateAgeLabel}`
+                  : stateAgeLabel}
               </span>
             )}
           </div>

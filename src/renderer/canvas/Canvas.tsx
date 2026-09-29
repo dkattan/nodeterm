@@ -426,6 +426,10 @@ import {
   type RestartRefusalReason
 } from '../terminal/agent-restart'
 import {
+  CLAUDE_SUBAGENT_RESTART_EVENT, canRestartForClaudeSubagents, restartForClaudeSubagents,
+  type ClaudeSubagentRestartCandidate
+} from '../terminal/claude-subagent-restart'
+import {
   planHibernation,
   shouldAutoWake,
   HIBERNATE_SWEEP_MS
@@ -8820,7 +8824,7 @@ export function Canvas() {
         // be dropped by React Flow's update queue.
         const outcome = fn
           ? await settleRestart(() =>
-              fn(undefined, undefined, true, undefined, async () => ({
+              fn(undefined, undefined, true, undefined, undefined, async () => ({
                 accountId: plan.targetAccountId
               }))
             )
@@ -8949,7 +8953,7 @@ export function Canvas() {
       const { plan } = decision
       let copy: ClaudeSessionCopyResult | undefined
       const outcome = await settleRestart(() =>
-        fn(undefined, undefined, true, undefined, async () => {
+        fn(undefined, undefined, true, undefined, undefined, async () => {
           copy = await window.nodeTerminal.claudeAccounts
             .copySession(plan.sessionId, plan.sourceAccountId, plan.targetAccountId, ctx)
             .catch((): ClaudeSessionCopyResult => ({ ok: false, reason: 'failed' }))
@@ -9261,6 +9265,70 @@ export function Canvas() {
       }
     })
   }, [bulkRestartPlan, setConfirm])
+
+  useEffect(() => {
+    let disposed = false
+    let running = false
+    const request = (event: Event): void => {
+      if (running || confirmBusy()) return
+      if (session.source === 'relay') {
+        setNotice({ kind: 'info', text: 'Restart Claude sessions from their host to apply its settings.' })
+        return
+      }
+      const projectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId
+      if (!projectId || projectId !== useProjects.getState().activeProjectId) return
+      running = true
+      void (async () => {
+        const read = (id: string): ClaudeSubagentRestartCandidate | undefined => {
+          if (disposed || projectId !== useProjects.getState().activeProjectId) return undefined
+          const node = nodesRef.current.find((n) => n.id === id)
+          if (!node) return undefined
+          const st = useAgentStatus.getState().byId[id]
+          return {
+            agentId: restartAgentIdOf(node), state: st?.state,
+            sessionId: restartSessionId(st?.sessionId, node.data.agentSessionId),
+            backgroundTask: !!st?.backgroundTaskAt,
+            liveSubagents: Object.values(useAgentNodes.getState().byId)
+              .some((child) => child.parentNodeId === id && child.state !== 'done'),
+            recurring: !!st?.loop,
+            subscription: node.data.clearEnv === true || useSettings.getState().settings.agentLaunchMode === 'subscription'
+          }
+        }
+        const candidates = nodesRef.current.filter((n) =>
+          canRestartForClaudeSubagents(read(n.id)) && !!agentRestartFn(n.id)).map((n) => n.id)
+        // A per-node subscription restart clears its one-shot flag after launch. Inspect the
+        // masked session env so this action cannot silently switch it back onto the gateway.
+        const gateways = await Promise.all(candidates.map(async (id) => {
+          try {
+            const info = await session.api.pty.envInfo(id)
+            return info.vars.some((v) => v.key === 'ANTHROPIC_BASE_URL' && v.set !== false && !!v.value) ? id : null
+          } catch { return null }
+        }))
+        if (disposed || projectId !== useProjects.getState().activeProjectId) return
+        const ids = gateways.filter((id): id is string => !!id && canRestartForClaudeSubagents(read(id)))
+        if (!ids.length) {
+          setNotice({ kind: 'info', text: 'No idle Claude gateway sessions in this project are available to restart.' })
+          return
+        }
+        if (confirmBusy()) return
+        setConfirm({
+          message: `Restart ${ids.length} idle Claude gateway sessions in this project with the new subagent settings? Conversations resume in fresh shells. Busy, waiting, unknown, scheduled, and background-work sessions are skipped.`,
+          confirmLabel: 'Restart idle sessions',
+          onConfirm: () => {
+            setConfirm(null)
+            void restartForClaudeSubagents(ids, read).then((outcomes) => setNotice({
+              kind: outcomes.some((o) => o === 'exit-timeout') ? 'error' : 'info',
+              text: summarizeBulkRestart(outcomes, { working: 0, noSession: 0 })
+            }))
+          }
+        })
+      })().catch(() => {
+        setNotice({ kind: 'error', text: 'Could not check Claude sessions. No restart was started.' })
+      }).finally(() => { running = false })
+    }
+    window.addEventListener(CLAUDE_SUBAGENT_RESTART_EVENT, request)
+    return () => { disposed = true; window.removeEventListener(CLAUDE_SUBAGENT_RESTART_EVENT, request) }
+  }, [session, setConfirm, confirmBusy])
 
   // Run Claude's /branch in this node, then open a new node that resumes the original
   // conversation (claude -r <ORIGINAL_ID>). The source node stays on the new branch.

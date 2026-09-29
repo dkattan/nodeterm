@@ -36,8 +36,26 @@ describe('SessionRow status age', () => {
     )
 
     expect(html).toContain('5m ago')
-    expect(html).toContain('Entered this state 5m ago')
+    expect(html).toContain('Last agent update 5m ago')
   })
+  it('visibly distinguishes a historical status from current activity', () => {
+    const html = renderToStaticMarkup(
+      <SessionRow
+        row={{ ...row, historicalStateLabel: 'Last seen Idle' }}
+        stateAgeLabel="5m ago"
+        onClick={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onAiName={vi.fn()}
+        onContextMenu={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+      />
+    )
+    expect(html).toContain('Last seen Idle · 5m ago')
+    expect(html).toContain('current activity has not been reported')
+  })
+
 })
 
 // Issue #291: the icon shows wherever the node is listed — the sidebar row draws it through the

@@ -29,6 +29,7 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
+import { useSession } from '../session/session'
 import { ProjectBranch } from './ProjectBranch'
 
 const HISTORY_COLLAPSE_KEY = 'history'
@@ -147,6 +148,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
+  const { api } = useSession()
 
   const [filter, setFilter] = useState('')
   const [statusNow, setStatusNow] = useState(() => Date.now())
@@ -190,7 +192,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       open && grouping === 'status'
         ? buildStatusList(projects, liveActiveNodes, activeProjectId, statusById, filter)
         : [],
-    [open, grouping, projects, liveActiveNodes, activeProjectId, statusById, filter]
+    [open, grouping, projects, liveActiveNodes, activeProjectId, statusById, filter, statusNow]
   )
   /**
    * The list came back with nothing in it — in EITHER grouping mode. "Nothing here" and "nothing
@@ -201,6 +203,17 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const noRows = grouping === 'status' ? statusSections.length === 0 : groups.length === 0
   const emptyState = sidebarEmptyState(noRows, filter, grouping)
   const clearFilter = useCallback(() => setFilter(''), [])
+
+  // Hooks emitted while the renderer reloads have already reached the core. Recover only their
+  // display metadata; replaying events here would trigger alerts and lifecycle decisions twice.
+  useEffect(() => {
+    if (!open || grouping !== 'status' || !api.readAgentStatusHistory) return
+    let cancelled = false
+    void api.readAgentStatusHistory().then((history) => {
+      if (!cancelled) useAgentStatus.getState().observeHistory(history)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [open, grouping, api])
 
   // Relative state ages need to advance even when no hook event arrives. Keep the clock dormant
   // unless the status view is visible; 30s catches minute boundaries without per-row timers.

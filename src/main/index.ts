@@ -209,6 +209,7 @@ import {
 } from './notch-hud'
 import {
   initAgentStatusMirror,
+  agentStatusHistory,
   onMirrorFlush,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
@@ -238,6 +239,7 @@ import {
   pendingTicketsFor
 } from '../core/agent-status-mirror'
 import { mirrorCustomAgents } from '../core/mirror-custom-agents'
+import { readClaudeStatusHistory } from '../core/claude-status-history'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
@@ -3110,6 +3112,16 @@ app.whenReady().then(async () => {
     }
   }
   hookServer.setListener(emitAgentStatus)
+  corePlatform.handle(IPC.agentStatusHistory, async () => {
+    const native = await readClaudeStatusHistory({ tmuxBin: ptyManager.getTmuxBin() })
+    const history = agentStatusHistory() // Read after the scan so a hook arriving during it wins.
+    for (const [id, observation] of Object.entries(native)) {
+      // The registry is local; never attach one of its labels to an SSH project's reused id.
+      if (workspaceStore.sshProjectIdForNode(id) || !workspaceStore.getNode(id)) continue
+      if (!history[id] || observation.updatedAt > history[id].updatedAt) history[id] = observation
+    }
+    return history
+  })
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
   // buttons (and any relay client) answer a held Claude permission hook here. Route by the node's
   // project: an SSH project's hook runs on the REMOTE host (write over its ControlMaster), a local

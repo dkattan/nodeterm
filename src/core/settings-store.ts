@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
+import { sanitizeClaudeSubagents } from "../shared/agents/model-gateway";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
 import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
@@ -15,6 +16,7 @@ import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
  */
 function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   const merged = { ...DEFAULT_SETTINGS, ...saved };
+  merged.claudeSubagents = sanitizeClaudeSubagents(saved?.claudeSubagents);
   merged.speech = { ...DEFAULT_SETTINGS.speech, ...saved?.speech };
   merged.modelGateway = {
     ...DEFAULT_SETTINGS.modelGateway,

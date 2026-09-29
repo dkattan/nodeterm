@@ -82,10 +82,9 @@ export function ContextMeter({
   const estimated = usage.windowSource === 'estimate'
   // ONE precedence rule for every ContextMeter surface. The transcript is what the CLI ECHOS,
   // but it lags a switch: a resumed transcript replays pre-switch rows, so its label can name a
-  // model the process no longer runs (the "GLM-5.2 under the context %" the launch record
-  // disproves). The node's launch record outranks it there; a hand-`claude`'d terminal has no
-  // record, and the transcript keeps its job. The used-token count stays transcript-owned; the
-  // persisted launch window owns the denominator when present.
+  // model the process no longer runs. The node's launch record outranks it there; a hand-launched
+  // Claude terminal has no record, and the transcript keeps its job. The used-token count stays
+  // transcript-owned; the persisted launch window owns the denominator when present.
   const model = contextMeterModel(usage.model, nodeModel)
   const modelLabel = formatModelLabel(model)
   return (

@@ -1,7 +1,7 @@
 import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
-import type { AgentState } from '@shared/agents/normalize'
+import type { AgentState, AgentStatusObservation } from '@shared/agents/normalize'
 import type { HeldPermission } from '@shared/agents/permission-answer'
 import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 import type { WakeContext } from '../terminal/wake-identity'
@@ -15,6 +15,7 @@ import type { RestartRefusalReason } from '@renderer/terminal/agent-restart'
  * `lastSeen` is a THIRD clock that exists only to be persisted: when the last hook event landed and
  * which state it asserted, restored as a "last seen" label and a sort key — never as a state, and
  * never as an idle clock (see its field comment).
+ * `lastKnownState` and `lastUpdateAt` retain display history only; neither is live evidence.
  * `agentId` is durable because a PLAIN terminal's agent identity exists nowhere else: an
  * explicit agent node re-derives it from `data.agentId`, but a hand-launched `claude` in a
  * plain terminal is only known here, and its context links must keep classifying across
@@ -67,6 +68,11 @@ export interface AgentNodeStatus {
    * session the moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
    */
   lastEventAt?: number
+  /** Last observed agent update, retained across reloads for Unknown session ordering.
+   * Never used to infer live state, freshness, or eligibility for hibernation. */
+  lastUpdateAt?: number
+  /** Last reported state for display after reload. Never read by lifecycle or messaging gates. */
+  lastKnownState?: AgentState
   /**
    * When the LAST hook event for this node landed, and the state it asserted — the one status clock
    * that survives an app restart. PERSISTED under its OWN small key (`<persistKey>.lastSeen`, see
@@ -369,6 +375,7 @@ export interface AgentStatusStore {
   onHookEvent(id: string, cb: () => void): () => void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
+  observeHistory(history: Record<string, AgentStatusObservation>): void
   setSession(id: string, session: string): void
   /** Record — or, with `undefined`, FORGET — this node's agent session id. Forgetting is what a
    *  cold-restore resume does when the CLI reports the conversation does not exist (issue #707):
@@ -592,6 +599,10 @@ export function createAgentStatusSession(
       for (const [id, v] of Object.entries(data)) {
         if (!v || typeof v !== 'object') continue
         out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId, agentId: v.agentId }
+        if (typeof v.lastUpdateAt === 'number' && Number.isFinite(v.lastUpdateAt) && v.lastUpdateAt > 0 && v.lastUpdateAt <= Date.now())
+          out[id].lastUpdateAt = v.lastUpdateAt
+        if (out[id].lastUpdateAt && ['working', 'waiting', 'blocked', 'done'].includes(v.lastKnownState ?? ''))
+          out[id].lastKnownState = v.lastKnownState
         // Minimal shape check, like `loop` below: this file is on disk and hand-editable, and a
         // half-written entry must not put a chip on a node claiming an identity it never had.
         if (
@@ -674,13 +685,16 @@ export function createAgentStatusSession(
           v.agentId ||
           v.account ||
           v.hibernated ||
-          v.paused
+          v.paused ||
+          v.lastUpdateAt !== undefined
         ) {
           out[id] = {
             unread: v.unread,
             session: v.session,
             sessionId: v.sessionId,
             agentId: v.agentId,
+            lastUpdateAt: v.lastUpdateAt,
+            lastKnownState: v.lastKnownState,
             // Durable beside `agentId`, and for the same reason (see the field comment): a plain
             // terminal's observed account exists nowhere else, and the tmux session that knows it
             // outlives the app.
@@ -840,6 +854,10 @@ export function createAgentStatusSession(
             // `stateAt`, and saved on the trailing debounce rather than once per tool event.
             s.byId[id].lastSeen = { at: now, state }
             scheduleClockSave()
+            if (state !== undefined) {
+              s.byId[id].lastUpdateAt = now
+              s.byId[id].lastKnownState = state
+            }
             // The evidence rides along, in place and for the same reason: a re-assert of the SAME
             // state by a legacy POST must not leave an earlier `true` standing, or this copy would
             // disagree with the mirror the gate actually reads.
@@ -850,7 +868,11 @@ export function createAgentStatusSession(
         // The ONE place a state transition is recorded, so it is also the one place the idle
         // clock is stamped (the same-state fast path above deliberately does not touch it —
         // see `lastEventAt`).
-        const next = { ...prev, state, stateAt: now, lastEventAt: now, lastSeen: { at: now, state } }
+        const next = {
+          ...prev, state, stateAt: now, lastEventAt: now, lastSeen: { at: now, state },
+          lastUpdateAt: state === undefined ? prev.lastUpdateAt : now,
+          lastKnownState: state
+        }
         // Written on the same edge the state is — the evidence describes THIS transition, and an
         // absent argument is not evidence.
         next.stateVerified = verified === true
@@ -931,21 +953,39 @@ export function createAgentStatusSession(
         // standing DROPPED verdict is withdrawn here, `done` included. That is the one self-heal
         // above which deliberately does NOT gate on `alive`: `done` must not clear `hibernated`
         // (a late Stop POST would undo a hibernation we just performed), but it absolutely does
-        // disprove "this pane has no CLI in it". Nothing is saved — the flag is transient.
+        // disprove "this pane has no CLI in it". The flag itself remains transient.
         if (prev.dropped) next.dropped = undefined
         // Same reasoning: a state transition is fired by a live CLI, so "it exited" no longer holds.
         if (prev.sessionEnded) next.sessionEnded = undefined
         const byId = { ...s.byId, [id]: next }
-        // `state` itself is transient, so a plain transition writes nothing — but dropping a
-        // PERSISTED flag has to reach disk, or a relaunch would restore a hibernated/paused node
-        // that has been demonstrably running since.
-        if (alive && (prev.hibernated || prev.paused)) save(byId)
-        scheduleClockSave()
+        // Retain update history without persisting live state or the hibernation clocks.
+        save(byId)
         return { byId }
       })
       // After the set: a listener reads the store and must see this event applied.
       pulse(id)
     },
+
+    observeHistory: (history) => set((s) => {
+      let changed = false
+      const byId = { ...s.byId }
+      for (const [id, observation] of Object.entries(history)) {
+        const prev = byId[id] ?? EMPTY
+        const at = observation.updatedAt
+        if (!Number.isFinite(at) || at <= 0 || at > Date.now()) continue
+        // A hook may arrive while the snapshot request is in flight. History never replaces
+        // a live state or a newer session reset, and never stamps a lifecycle/identity clock.
+        // The stale sweeper retains lastKnownState; its synthetic clock is not an agent update.
+        const resetAt = prev.lastKnownState === undefined ? prev.stateAt ?? 0 : 0
+        if (prev.state !== undefined || at <= Math.max(prev.lastUpdateAt ?? 0, resetAt)) continue
+        if (observation.state !== undefined && !['working', 'waiting', 'blocked', 'done'].includes(observation.state)) continue
+        byId[id] = { ...prev, lastKnownState: observation.state, lastUpdateAt: at }
+        changed = true
+      }
+      if (!changed) return s
+      save(byId)
+      return { byId }
+    }),
 
     sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>
       set((s) => {
@@ -960,6 +1000,7 @@ export function createAgentStatusSession(
             changed = true
           }
         }
+        if (changed) save(byId)
         return changed ? { byId } : s
       }),
 

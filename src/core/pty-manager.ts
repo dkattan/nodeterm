@@ -3699,15 +3699,22 @@ export class PtyManager {
           )
         : { modelId: undefined, env: {} }
     const autocompactEnv = autocompact.env
+    const claudeGateway = !!gatewayEnv.ANTHROPIC_BASE_URL && !!options.agentId &&
+      capabilityAgentId(options.agentId) === 'claude'
     const subagentEnv =
-      !stripRe && options.agentId
+      claudeGateway && options.agentId
         ? claudeSubagentEnvFor(
             options.agentId as AgentId,
             gatewayModels,
-            this.getSettings().modelGatewayDefaultModel
+            this.getSettings().claudeSubagents,
+            options.agentModel
           )
         : {}
+    const resetClaudeEnv = claudeGateway || (!!stripRe && !!options.agentId && capabilityAgentId(options.agentId) === 'claude')
+      ? [...CLAUDE_SUBAGENT_ENV_KEYS, ...AUTOCOMPACT_ENV_KEYS] : []
     if (!options.sshRemote) {
+      // A new policy must not inherit a previous gateway session's forced model or budget.
+      for (const key of resetClaudeEnv) delete env[key]
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
       for (const [k, v] of Object.entries(autocompactEnv)) env[k] = v
       for (const [k, v] of Object.entries(subagentEnv)) env[k] = v
@@ -3927,7 +3934,7 @@ export class PtyManager {
       }
       let remoteSessionEnv: RemoteSessionEnv | undefined
       if (
-        Object.keys(remoteEnvPairs).length &&
+        (Object.keys(remoteEnvPairs).length || resetClaudeEnv.length) &&
         options.sshRemote.remoteHome &&
         remoteSessionEnvAvailable()
       ) {
@@ -3938,7 +3945,7 @@ export class PtyManager {
         stageRemoteSessionEnv(
           options.sshRemote.controlPath,
           envFile,
-          sessionEnvFileContent(remoteEnvPairs)
+          sessionEnvFileContent(remoteEnvPairs, resetClaudeEnv)
         )
         const baked = new Set<string>([
           ...MODEL_GATEWAY_ENV_KEYS,
@@ -3949,7 +3956,7 @@ export class PtyManager {
           file: envFile,
           extraKeys: Object.keys(remoteEnvPairs).filter((k) => !baked.has(k))
         }
-      } else if (Object.keys(remoteEnvPairs).length) {
+      } else if (Object.keys(remoteEnvPairs).length || resetClaudeEnv.length) {
         console.warn(
           '[pty] remote session env skipped (no remote home or no uploader) — agent will launch without gateway/custom env'
         )

@@ -14,7 +14,7 @@ import type { CustomAgent } from '../types'
 const claudeProxy: CustomAgent = {
   id: 'custom:proxy',
   label: 'Claude (proxy)',
-  launchCmd: 'claude-wopr',
+  launchCmd: 'claude-proxy',
   baseAgent: 'claude',
   env: { ANTHROPIC_AUTH_TOKEN: '${env:MY_TOKEN}' },
   args: '--model ${env:MY_MODEL}'
@@ -66,7 +66,7 @@ describe('resolveAgentConfig — custom with a base harness', () => {
     expect(resolveAgentConfig('custom:proxy2', blank).launchCmd).toBe('claude')
   })
   it('uses the custom launchCmd when set', () => {
-    expect(resolveAgentConfig('custom:proxy', claudeProxy).launchCmd).toBe('claude-wopr')
+    expect(resolveAgentConfig('custom:proxy', claudeProxy).launchCmd).toBe('claude-proxy')
   })
   it('inherits promptInjectionMode / separator / expectedProcess from the base', () => {
     const c = resolveAgentConfig('custom:proxy', claudeProxy)
@@ -78,7 +78,7 @@ describe('resolveAgentConfig — custom with a base harness', () => {
     const stale: CustomAgent = {
       id: 'custom:stale',
       label: 'Stale',
-      launchCmd: 'claude-wopr',
+      launchCmd: 'claude-proxy',
       baseAgent: 'claude',
       promptInjectionMode: 'flag-prompt'
     }

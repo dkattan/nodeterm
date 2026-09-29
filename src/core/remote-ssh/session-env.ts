@@ -64,8 +64,8 @@ export function remoteSessionEnvPath(remoteHome: string, session: string): strin
 
 /** Render `export K='v'` lines. Values go through the same single-quote fence every typed
  *  command uses; unsafe NAMES are dropped entirely (a name is spliced bare on the left of `=`). */
-export function sessionEnvFileContent(pairs: Record<string, string>): string {
-  const lines: string[] = []
+export function sessionEnvFileContent(pairs: Record<string, string>, unsetKeys: readonly string[] = []): string {
+  const lines = unsetKeys.filter(isSafeEnvName).map((key) => `unset ${key}`)
   for (const [k, v] of Object.entries(pairs)) {
     if (!isSafeEnvName(k)) continue
     lines.push(`export ${k}=${shellSingleQuote(v)}`)

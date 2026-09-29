@@ -14,7 +14,7 @@
  * restart wrote it), while the transcript label is only as fresh as its last row.
  *
  * So: the launch record outranks to give the restarted session the RIGHT label before the
- * transcript has any post-switch row to name — no lingering "GLM-5.2" under the context %.
+ * transcript has any post-switch row to name, instead of retaining the previous model label.
  * Otherwise the transcript stands (a hand-launched `claude` in a plain terminal has no
  * record anywhere; a node whose record was never set (`clearEnv`, CLI default) falls back to
  * the live read too — an empty record says nothing, it does not assert).

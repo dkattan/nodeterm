@@ -18,8 +18,7 @@ import {
   claudeAutocompactFor,
   claudeEffortFor,
   claudeSubagentEnvFor,
-  claudeSubagentModelFor,
-  CLAUDE_SUBAGENT_EFFORT_FALLBACK,
+  sanitizeClaudeSubagents,
   AUTOCOMPACT_THRESHOLD,
   AUTOCOMPACT_PCT_OVERRIDE,
   tmuxUpdateEnvironmentLine
@@ -402,10 +401,10 @@ describe('claudeAutocompactFor', () => {
     // 400000, status line still 200k) — the [1m] suffix is the only lever Claude Code honors
     // for the meter, so every above-threshold window carries it, mid-band included.
     const mid = parseGatewayModels({
-      data: [{ id: 'vllm/GLM-5.3-Flash-NVFP4', context_length: 400_000 }]
+      data: [{ id: 'provider/long-model', context_length: 400_000 }]
     })
-    const r = claudeAutocompactFor('claude', 'vllm/GLM-5.3-Flash-NVFP4', mid)
-    expect(r.modelId).toBe('vllm/GLM-5.3-Flash-NVFP4[1m]')
+    const r = claudeAutocompactFor('claude', 'provider/long-model', mid)
+    expect(r.modelId).toBe('provider/long-model[1m]')
     expect(r.env).toEqual({
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: AUTOCOMPACT_PCT_OVERRIDE
@@ -414,19 +413,19 @@ describe('claudeAutocompactFor', () => {
 
   it('a suffixed mid-band record stays suffixed — the suffix is not re-stripped on re-launch', () => {
     const mid = parseGatewayModels({
-      data: [{ id: 'vllm/GLM-5.2-NVFP4-MTP', context_length: 400_000 }]
+      data: [{ id: 'provider/previous-model', context_length: 400_000 }]
     })
-    const r = claudeAutocompactFor('claude', 'vllm/GLM-5.2-NVFP4-MTP[1m]', mid)
-    expect(r.modelId).toBe('vllm/GLM-5.2-NVFP4-MTP[1m]')
+    const r = claudeAutocompactFor('claude', 'provider/previous-model[1m]', mid)
+    expect(r.modelId).toBe('provider/previous-model[1m]')
     expect(r.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('400000')
   })
 
   it('does not double-append [1m] when the id already carries it', () => {
     const withSuffix = parseGatewayModels({
-      data: [{ id: 'vllm/GLM-5.2-NVFP4-MTP[1m]', context_length: 1_000_000 }]
+      data: [{ id: 'provider/previous-model[1m]', context_length: 1_000_000 }]
     })
-    const r = claudeAutocompactFor('claude', 'vllm/GLM-5.2-NVFP4-MTP[1m]', withSuffix)
-    expect(r.modelId).toBe('vllm/GLM-5.2-NVFP4-MTP[1m]')
+    const r = claudeAutocompactFor('claude', 'provider/previous-model[1m]', withSuffix)
+    expect(r.modelId).toBe('provider/previous-model[1m]')
     expect(r.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
   })
 
@@ -519,114 +518,168 @@ describe('autocompact env keys lockstep', () => {
 
 describe('Claude gateway subagent routing', () => {
   const models = [
-    { id: 'vllm/zeta', contextWindow: 200_000 },
-    { id: 'anthropic/alpha' }
+    { id: 'provider/compact-model', contextWindow: 131_072 },
+    { id: 'provider/long-model', contextWindow: 400_000 }
   ]
 
-  it('prefers the configured default when the gateway lists it', () => {
-    expect(claudeSubagentModelFor(models, 'vllm/zeta')).toBe('vllm/zeta')
-  })
-
-  it('prefers the reasoning alias when no default is configured', () => {
-    const catalog = [...models, { id: 'reasoning' }]
-    expect(claudeSubagentModelFor(catalog)).toBe('reasoning')
-    // The configured default still beats the alias; a catalogue without it stays deterministic.
-    expect(claudeSubagentModelFor(catalog, 'vllm/zeta')).toBe('vllm/zeta')
-    expect(claudeSubagentModelFor(models)).toBe('anthropic/alpha')
-  })
-
-  it('falls back deterministically when the default is absent or unlisted', () => {
-    expect(claudeSubagentModelFor(models, 'missing')).toBe('anthropic/alpha')
-    expect(claudeSubagentModelFor([...models].reverse())).toBe('anthropic/alpha')
-  })
-
-  it('routes independently of context metadata and only for a Claude-base agent', () => {
-    expect(claudeSubagentEnvFor('claude', models)).toEqual({
-      CLAUDE_CODE_SUBAGENT_MODEL: 'anthropic/alpha',
-      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
-      CLAUDE_CODE_EFFORT_LEVEL: CLAUDE_SUBAGENT_EFFORT_FALLBACK
-    })
-    for (const id of ['codex', 'copilot', 'custom:plain'] as const) {
-      expect(claudeSubagentEnvFor(id, models)).toEqual({})
+  it('inherits the actual parent instead of falling back to the first discovered model', () => {
+    for (const catalog of [models, [...models].reverse(), []]) {
+      expect(claudeSubagentEnvFor('claude', catalog, undefined, 'provider/long-model[1m]')).toEqual({
+        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+        ...(catalog.length ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '80' } : {})
+      })
     }
-    expect(claudeSubagentModelFor([], 'vllm/zeta')).toBeUndefined()
-    expect(claudeSubagentEnvFor('claude', [], 'vllm/zeta')).toEqual({})
+    // An unspecified parent is resolved by Claude at runtime, never guessed from discovery.
+    expect(claudeSubagentEnvFor('claude', models).CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
   })
 
-  it('forces the served route for custom Claude agents too', () => {
+  it('lets Claude choose without any nodeterm model/force/effort override', () => {
+    expect(claudeSubagentEnvFor('claude', models, { mode: 'claude', force: true, model: 'provider/compact-model' })).toEqual({})
+  })
+
+  it('pairs a selected large-context subagent model with its suffix and discovered window', () => {
+    expect(claudeSubagentEnvFor('claude', models, { mode: 'model', model: 'provider/long-model', force: true }, 'provider/long-model')).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'provider/long-model[1m]',
+      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '80'
+    })
+  })
+
+  it.each([
+    ['provider/long-model', 'provider/compact-model', 'provider/compact-model'],
+    ['provider/compact-model', 'provider/long-model', 'provider/long-model[1m]']
+  ])('caps the shared budget for parent %s and subagent %s', (parent, child, expected) => {
+    const env = claudeSubagentEnvFor('claude', models, { mode: 'model', model: child, force: false }, parent)
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe(expected)
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBeUndefined()
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('131072')
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe('80')
+  })
+
+  it('keeps an explicit route during discovery outages without guessing its context', () => {
+    expect(claudeSubagentEnvFor('claude', [], { mode: 'model', model: 'saved[1m]', force: true })).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'saved[1m]', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1'
+    })
+  })
+
+  it('normalizes partial settings and never invents a model selection', () => {
+    for (const v of [null, undefined, 1, { mode: 'invalid', model: 3 }, { mode: 'parent' }])
+      expect(sanitizeClaudeSubagents(v)).toEqual({ mode: 'parent', force: true })
+    expect(sanitizeClaudeSubagents({ mode: 'model', model: ' provider/long-model ', force: false }))
+      .toEqual({ mode: 'model', model: 'provider/long-model', force: false })
+    expect(claudeSubagentEnvFor('claude', models, { mode: 'model', force: false }).CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBe('1')
+  })
+
+  it('applies only to Claude and Claude-based custom agents', () => {
+    for (const id of ['codex', 'copilot', 'custom:plain'] as const)
+      expect(claudeSubagentEnvFor(id, models)).toEqual({})
     setCustomAgentBaseResolver((id) => id === 'custom:proxy' ? 'claude' : undefined)
     try {
-      expect(claudeSubagentEnvFor('custom:proxy', models, 'vllm/zeta')).toEqual({
-        CLAUDE_CODE_SUBAGENT_MODEL: 'vllm/zeta',
-        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
-        CLAUDE_CODE_EFFORT_LEVEL: CLAUDE_SUBAGENT_EFFORT_FALLBACK
-      })
-    } finally {
-      setCustomAgentBaseResolver(null)
-    }
+      expect(claudeSubagentEnvFor('custom:proxy', models).CLAUDE_CODE_SUBAGENT_MODEL_FORCE).toBe('1')
+    } finally { setCustomAgentBaseResolver(null) }
   })
 
-  it('delivers every subagent control through the local and remote tmux environment', () => {
-    const keys = Object.keys(claudeSubagentEnvFor('claude', models))
-    const updateNames = tmuxUpdateEnvironmentLine().split('"')[1].split(' ')
-    for (const key of keys) expect(updateNames).toContain(key)
+  it('delivers all controls through local and remote tmux', () => {
+    const env = claudeSubagentEnvFor('claude', models, { mode: 'model', model: 'provider/long-model', force: true })
+    const names = tmuxUpdateEnvironmentLine().split('"')[1].split(' ')
+    for (const key of Object.keys(env)) expect(names).toContain(key)
   })
 })
 
 describe('gateway reasoning metadata', () => {
   const parsed = parseGatewayModels({
     data: [
-      { id: 'vllm/Qwen3.8-27B-FP8', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'], default_effort: 'xhigh' } },
-      { id: 'vllm/chat-fast', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'] } },
-      { id: 'vllm/GLM-5.3-Flash-FP8' },
-      { id: 'vllm/broken', reasoning: { supported_efforts: ['no spaces allowed', 42, null], default_effort: '' } },
-      { id: 'vllm/empty-efforts', reasoning: { supported_efforts: [] } },
-      { id: 'vllm/wrong-shape', reasoning: 'xhigh' }
+      { id: 'provider/configurable-model', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'], default_effort: 'xhigh' } },
+      { id: 'provider/compact-model', reasoning: { supported_efforts: ['low', 'medium', 'xhigh'] } },
+      { id: 'provider/metadata-free-model' },
+      { id: 'provider/broken', reasoning: { supported_efforts: ['no spaces allowed', 42, null], default_effort: '' } },
+      { id: 'provider/empty-efforts', reasoning: { supported_efforts: [] } },
+      { id: 'provider/wrong-shape', reasoning: 'xhigh' }
     ]
   })
   const byId = (id: string) => parsed.find((m) => m.id === id)
 
   it('parses the Bifrost reasoning block into supported/default efforts', () => {
-    expect(byId('vllm/Qwen3.8-27B-FP8')?.reasoning).toEqual({
+    expect(byId('provider/configurable-model')?.reasoning).toEqual({
       supportedEfforts: ['low', 'medium', 'xhigh'],
       defaultEffort: 'xhigh'
     })
-    expect(byId('vllm/chat-fast')?.reasoning).toEqual({ supportedEfforts: ['low', 'medium', 'xhigh'] })
+    expect(byId('provider/compact-model')?.reasoning).toEqual({ supportedEfforts: ['low', 'medium', 'xhigh'] })
   })
 
   it('keeps models without usable reasoning metadata plain', () => {
-    for (const id of ['vllm/GLM-5.3-Flash-FP8', 'vllm/broken', 'vllm/empty-efforts', 'vllm/wrong-shape']) {
+    for (const id of ['provider/metadata-free-model', 'provider/broken', 'provider/empty-efforts', 'provider/wrong-shape']) {
       expect(byId(id)?.reasoning).toBeUndefined()
     }
   })
 
   it('derives the effort from the selected model, preferring its own default', () => {
-    expect(claudeEffortFor(parsed, 'vllm/Qwen3.8-27B-FP8')).toBe('xhigh')
-    // No default reported ⇒ the highest supported level.
-    expect(claudeEffortFor(parsed, 'vllm/chat-fast')).toBe('xhigh')
+    expect(claudeEffortFor(parsed, 'provider/configurable-model')).toBe('xhigh')
+    // No default reported: listing supported values does not establish a preference.
+    expect(claudeEffortFor(parsed, 'provider/compact-model')).toBeUndefined()
   })
 
-  it('falls back to the static default when the model is unknown or carries no metadata', () => {
-    for (const id of ['vllm/GLM-5.3-Flash-FP8', 'vllm/broken', 'vllm/empty-efforts', 'vllm/wrong-shape', 'vllm/missing']) {
-      expect(claudeEffortFor(parsed, id)).toBe(CLAUDE_SUBAGENT_EFFORT_FALLBACK)
+  it('leaves effort selection to Claude when the model is unknown or carries no metadata', () => {
+    for (const id of ['provider/metadata-free-model', 'provider/broken', 'provider/empty-efforts', 'provider/wrong-shape', 'provider/missing']) {
+      expect(claudeEffortFor(parsed, id)).toBeUndefined()
     }
-    expect(claudeEffortFor(parsed, undefined)).toBe(CLAUDE_SUBAGENT_EFFORT_FALLBACK)
+    expect(claudeEffortFor(parsed, undefined)).toBeUndefined()
+  })
+
+  it('does not infer an effort ranking from list order or accept a contradictory default', () => {
+    for (const supported_efforts of [['low', 'high'], ['high', 'low']]) {
+      const catalogue = parseGatewayModels({ data: [
+        { id: 'provider/model', reasoning: { supported_efforts } },
+        { id: 'provider/inconsistent', reasoning: { supported_efforts, default_effort: 'unsupported' } }
+      ] })
+      for (const model of catalogue) {
+        expect(claudeEffortFor(catalogue, model.id)).toBeUndefined()
+        expect(claudeSubagentEnvFor('claude', catalogue, undefined, model.id))
+          .not.toHaveProperty('CLAUDE_CODE_EFFORT_LEVEL')
+      }
+    }
+  })
+
+  it('follows changed discovery metadata for the same arbitrary model id', () => {
+    for (const context_length of [147_456, 384_000, 768_000]) {
+      for (const default_effort of ['low', 'medium']) {
+        const catalogue = parseGatewayModels({ data: [{
+          id: 'provider/unfamiliar-route', context_length,
+          reasoning: { supported_efforts: ['medium', 'low'], default_effort }
+        }] })
+        expect(claudeSubagentEnvFor('claude', catalogue, {
+          mode: 'model', model: 'provider/unfamiliar-route', force: true
+        })).toMatchObject({
+          CLAUDE_CODE_SUBAGENT_MODEL: context_length > AUTOCOMPACT_THRESHOLD
+            ? 'provider/unfamiliar-route[1m]' : 'provider/unfamiliar-route',
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(context_length),
+          CLAUDE_CODE_EFFORT_LEVEL: default_effort
+        })
+      }
+    }
+  })
+
+  it('uses the sole advertised effort without requiring a default', () => {
+    const catalogue = parseGatewayModels({ data: [{
+      id: 'provider/single-choice', reasoning: { supported_efforts: ['medium'] }
+    }] })
+    expect(claudeEffortFor(catalogue, 'provider/single-choice')).toBe('medium')
   })
 
   it('matches the autocompact `[1m]` spelling', () => {
     const with1m = parseGatewayModels({
-      data: [{ id: 'vllm/long', reasoning: { supported_efforts: ['low'], default_effort: 'low' } }]
+      data: [{ id: 'provider/long', reasoning: { supported_efforts: ['low'], default_effort: 'low' } }]
     })
-    expect(claudeEffortFor(with1m, 'vllm/long[1m]')).toBe('low')
+    expect(claudeEffortFor(with1m, 'provider/long[1m]')).toBe('low')
   })
 })
 
 describe('modelContextWindow', () => {
-  const models = [{ id: 'vllm/GLM-5.3', contextWindow: 400_000 }]
+  const models = [{ id: 'provider/example-model', contextWindow: 400_000 }]
 
   it('matches either plain or [1m]-suffixed spelling', () => {
-    expect(modelContextWindow('vllm/GLM-5.3', models)).toBe(400_000)
-    expect(modelContextWindow('vllm/GLM-5.3[1m]', models)).toBe(400_000)
+    expect(modelContextWindow('provider/example-model', models)).toBe(400_000)
+    expect(modelContextWindow('provider/example-model[1m]', models)).toBe(400_000)
   })
 
   it('returns undefined for an absent model or invalid window', () => {

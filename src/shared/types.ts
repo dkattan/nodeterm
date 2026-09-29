@@ -9,7 +9,7 @@ import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
-import type { NormalizedAgentEvent } from './agents/normalize'
+import type { AgentStatusObservation, NormalizedAgentEvent } from './agents/normalize'
 import type { PaneOwner } from './agents/pane-owner-predicate'
 import type { AnswerPermissionPayload, ChatQuestion } from './agents/permission-answer'
 import type { HostChatQuery, HostChatReply } from './mobile-chat'
@@ -31,6 +31,7 @@ import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type { AlertSoundKind, AlertSoundSaveResult, CustomAlertSounds } from './alert-sound'
 import type { CanvasLayout, LayoutViewports } from './canvas-layout'
 import type {
+  ClaudeSubagentSettings,
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
   ModelGatewaySettings
@@ -2068,6 +2069,8 @@ export interface Settings {
    *  `agentLaunchMode === 'gateway-model'`. A separate field from `modelGateway` (it is NOT a
    *  credential). Absent/empty = no default ⇒ `'gateway-model'` behaves like `'gateway'`. */
   modelGatewayDefaultModel?: string
+  /** Claude gateway subagent model policy; subscription launches keep Claude’s own behavior. */
+  claudeSubagents: ClaudeSubagentSettings
   /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
    *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
    *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
@@ -2357,6 +2360,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // No default gateway model until the user picks one in Settings → Model gateway. Absent ⇒
   // `'gateway-model'` behaves like `'gateway'` (no --model on a fresh spawn).
   modelGatewayDefaultModel: undefined,
+  claudeSubagents: { mode: 'parent', force: true },
   agentLaunchCommands: {},
   claudeAccounts: [],
   codexAccounts: [],
@@ -4324,6 +4328,9 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Desktop display history for hooks missed while the renderer was closed/reloading.
+   *  No hook replay, identity proof, or authorization is carried by these observations. */
+  readAgentStatusHistory?(): Promise<Record<string, AgentStatusObservation>>
   /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
    *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
    *  called on every `setHibernated` change and replayed for the persisted set at boot. */

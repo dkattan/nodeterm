@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ClaudeSubagentSettingsPanel } from '../ClaudeSubagentSettingsPanel'
 import { useSettings } from '../../../state/settings'
 import { useProjects } from '../../../state/projects'
 import { useBrowserLease, drivingNodeIds } from '../../../state/browserLease'
@@ -106,7 +107,10 @@ const ROWS = {
     title: 'Agent messaging in projects that do not set it',
     keywords: ['agent', 'message', 'messaging', 'default', 'project', 'send', 'reply', 'orchestration']
   },
-  permissionMode: {
+  claudeSubagents: {
+    title: 'Claude subagents',
+    keywords: ['claude', 'subagent', 'model', 'context', 'gateway', 'inherit', 'force']
+  },  permissionMode: {
     title: 'Permission mode',
     keywords: [
       'permission',
@@ -549,6 +553,9 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             </Select>
           }
         />
+      </SearchableRow>
+      <SearchableRow {...ROWS.claudeSubagents}>
+        <ClaudeSubagentSettingsPanel />
       </SearchableRow>
       <SearchableRow {...ROWS.permissionMode}>
         <FieldRow

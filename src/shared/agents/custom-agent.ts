@@ -63,7 +63,7 @@ export function resolveAgentConfig(
   const launchCmd = customAgent?.launchCmd?.trim() || base?.launchCmd || id
   // The prompt grammar is a property of the HARNESS, not a user preference: `flag-prompt`
   // (emitting `--prompt <p>`) is opencode-specific — claude/codex/grok take a POSITIONAL (`argv`)
-  // and gemini uses `stdin-after-start`. A custom agent wrapping claude (e.g. claude-wopr) speaks
+  // and gemini uses `stdin-after-start`. A custom agent wrapping claude speaks
   // claude's positional grammar, so a stale `flag-prompt` on its record would emit `--prompt`,
   // which claude rejects (`unknown option '--prompt'`). When a `baseAgent` is declared, the base's
   // promptInjectionMode is AUTHORITATIVE and the custom record's value is ignored — exactly like

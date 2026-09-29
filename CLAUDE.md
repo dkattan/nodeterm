@@ -2151,6 +2151,10 @@ else, and its context links must keep classifying across restarts).
   the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
+  **No deployment-specific model data in source.** Model ids/aliases, context/output limits, and
+  reasoning capabilities/defaults come from discovery or explicit user configuration. Do not
+  bake a deployment's routes or capabilities into runtime defaults. Regression fixtures use
+  synthetic model names; CLI protocol conventions such as `[1m]` remain adapter behavior.
   **Large-context Claude launches.** Model discovery retains a positive integer context window
   from `context_length`, `max_context_length`, or `context_window`. For a claude-base agent,
   `claudeAutocompactFor` appends `[1m]` to a discovered model above 200k and emits
@@ -2167,22 +2171,33 @@ else, and its context links must keep classifying across restarts).
   catalogue before the debounced replacement request; replacing the stored key explicitly clears
   it because the persisted secret sentinel itself does not change. Core accepts a discovery result
   into launch state only when it is the latest request and still matches the saved configuration.
-  **Claude subagents use the same gateway catalogue.** A gateway-backed claude-base session sets
-  `CLAUDE_CODE_SUBAGENT_MODEL` to the configured default when that id is listed; with no default
-  configured, the subagent route prefers the `reasoning` alias when the catalogue
-  lists it (the inference box's heavy-work route — an administrator-defined alias is ordinary
-  catalogue data, so this preference is deliberate, not discovery). The session also defaults
-  `CLAUDE_CODE_EFFORT_LEVEL` from the selected model's discovered `reasoning` metadata (Bifrost's
-  `{supported_efforts, default_effort}` block on `/v1/models`, parsed into `GatewayModel.reasoning`):
-  the route's own `default_effort` when reported, else its highest supported level, else
-  `xhigh` (`CLAUDE_SUBAGENT_EFFORT_FALLBACK`). Absent reasoning metadata is NOT evidence thinking is
-  unsupported — discovery omits the block on some served routes (e.g. GLM-5.3-Flash) — so the
-  fallback emits the level rather than omitting the variable; Claude clamps unknown levels itself,
-  and a route that rejects one errors noisily instead of silently un-thinking every subagent.
-  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` keeps explicit Agent-tool model choices (such as `sonnet`
-  and `haiku`) on the served route (Claude Code 2.1.251 changed precedence, 2.1.257 added the
-  force switch). This effort setting applies to both parent and children; project/custom-agent env
-  can override it, and local subscription launches strip all three, including inherited values.
+  **Claude subagent policy (Settings → Agents → Claude subagents).** `settings.claudeSubagents`
+  defaults to `{ mode: 'parent', force: true }`, including on upgrades. Gateway sessions in parent
+  mode set only `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` for routing: Claude inherits the actual parent
+  model and its `[1m]` spelling, including subsequent `/model` changes. There is no alphabetical,
+  unprefixed-alias, or global gateway-default fallback. Specific-model mode uses the explicit
+  selected id, normalized through `claudeAutocompactFor`; its `force` switch decides whether
+  agent-file/per-call model choices may override it. `mode: 'claude'` emits no routing/effort
+  override. Force requires Claude Code 2.1.257+. A saved route remains explicit when discovery is
+  temporarily unavailable; the UI labels it missing rather than silently selecting another model.
+  Claude shares its compaction environment between parent and subagents. Use the smaller known
+  parent/selected-child context window, including windows below 200k, and the 80% threshold;
+  the specific model's large-context suffix is preserved. Budgets are calculated at launch, not
+  recomputed after an in-CLI model change. Claude clamps its compaction window to at least 100k,
+  so smaller backends require their own additional token-budget safeguards.
+  `CLAUDE_CODE_EFFORT_LEVEL` uses the selected child's (or parent's in inherit mode) discovered
+  reasoning default, or its sole supported effort. Missing metadata or multiple choices without
+  a default leave effort selection to Claude; array order does not imply a preference. This affects
+  both parent and children; there is no separate subagent effort UI. Fresh launches clear inherited routing,
+  effort and compaction controls before applying the policy; project/custom-agent env still wins.
+  SSH staging unsets the same keys before exporting overrides. Subscription launches inject no
+  policy. Desktop and Server Edition share this core behavior. Mobile (`nodeterm-ios`, private)
+  needs a matching policy settings UI; its wire protocol is unchanged.
+  The settings restart action first awaits settings persistence, then confirms restarting only
+  idle Claude gateway sessions in the current project. It checks the masked session environment
+  to avoid switching subscription sessions, recycles shells to refresh env, and skips unknown,
+  busy/waiting, recurring, subagent-owning, or background-task sessions. Eligibility is rechecked
+  before each restart and immediately before termination; relay sessions use their owning host.
   **Launch records keep context meters truthful across model switches.** `agentModel` persists the
   user's requested catalogue choice for later restarts, while `agentLaunchModel` and
   `agentLaunchContextWindow` record the exact model id and discovered window during initial command
@@ -2191,7 +2206,8 @@ else, and its context links must keep classifying across restarts).
   model or window until the next assistant row arrives. Hand-launched and older sessions fall back
   to transcript metadata, with `core/model-window.ts` consulting `PtyManager`'s current
   scope-checked catalogue for discovered windows. Exact ids, optional `[1m]` spelling, and the
-  final provider path segment match; a known family window remains the floor, and a settings or
+  unique unprefixed transcript model match. Discovery overrides native family guesses, even for
+  smaller windows; provider-qualified ids never borrow another provider's metadata. A settings or
   credential change immediately removes the old catalogue from consideration.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,

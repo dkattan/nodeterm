@@ -194,6 +194,20 @@ describe('SettingsStore nested-default merge', () => {
     })
   })
 
+  it('loads legacy and partial Claude subagent policies without inheriting the gateway default', () => {
+    for (const [saved, expected] of [
+      [{ modelGatewayDefaultModel: 'provider/compact-model' }, { mode: 'parent', force: true }],
+      [{ claudeSubagents: { mode: 'model', model: 'provider/long-model' } }, { mode: 'model', model: 'provider/long-model', force: true }],
+      [{ claudeSubagents: { mode: 'claude', force: false } }, { mode: 'claude', force: false }],
+      [{ claudeSubagents: { mode: 'bogus', model: 123 } }, { mode: 'parent', force: true }]
+    ]) {
+      writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')
+      const store = new SettingsStore()
+      store.init()
+      expect(store.get().claudeSubagents).toEqual(expected)
+    }
+  })
+
   describe('agent launch mode migration', () => {
     const loadWith = (saved: Record<string, unknown>): Settings => {
       writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')

@@ -5,8 +5,8 @@ describe('contextMeterModel', () => {
   it('prefers the launch record when present', () => {
     // Trailing a switch: the transcript replays pre-switch rows, so its label can name a model
     // the session no longer runs. The record is what the user clicked.
-    expect(contextMeterModel('vllm/GLM-5.2-NVFP4-MTP', 'vllm/GLM-5.3-Flash-NVFP4')).toBe(
-      'vllm/GLM-5.3-Flash-NVFP4'
+    expect(contextMeterModel('provider/previous-model', 'provider/long-model')).toBe(
+      'provider/long-model'
     )
   })
 
@@ -22,7 +22,7 @@ describe('contextMeterModel', () => {
   it('passes the record through verbatim (no [1m] normalization at DISPLAY time)', () => {
     // The supervisor already normalizes [1m] where a comparison needs it; the display shows what
     // the CLI was launched with.
-    expect(contextMeterModel(null, 'vllm/GLM-5.3-Flash-NVFP4[1m]')).toBe('vllm/GLM-5.3-Flash-NVFP4[1m]')
+    expect(contextMeterModel(null, 'provider/long-model[1m]')).toBe('provider/long-model[1m]')
   })
 
   it('returns null when neither source has a model', () => {

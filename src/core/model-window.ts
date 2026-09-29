@@ -13,7 +13,8 @@ export function sessionContextWindow(value: unknown): number | null {
 // even when 1M is active, so the window can NOT be detected from the id alone. We therefore
 // map the model FAMILY to its window: opus/sonnet/fable/mythos → 1M, haiku → 200k, unknown
 // → 200k. (Accounts with 1M access see the right denominator; the Models API is not consulted
-// — it returns capability, and the call added latency for no gain.) Fully synchronous.
+// — it returns capability, and the call added latency for no gain.) These native-Claude guesses
+// apply only when the current gateway catalogue has no matching window. Fully synchronous.
 
 const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
@@ -52,21 +53,16 @@ function gatewayWindowFor(model: string | null): number | undefined {
   const base = model.trim().replace(/\[1m\]$/, '')
   if (!base) return undefined
   const models = gatewayModels()
-  // Exact ids first (the model argument is trimmed, so keep the raw compare too). Then the
-  // LAST `/` SEGMENT as a fallback — measured: transcripts written on a gateway session name
-  // `GLM-5.3-Flash-NVFP4` while the catalogue carries `vllm/GLM-5.3-Flash-NVFP4`, so an
-  // exact-only lookup missed exactly the models a gateway serves. Segment equality is still
-  // equality, not a guess.
+  // Exact ids first. Some transcripts omit the provider prefix, so allow a unique unprefixed
+  // match too. Never borrow another provider's window or resolve an ambiguous alias by order.
   for (const entry of models) {
     const gid = entry.id.trim().replace(/\[1m\]$/, '')
     const win = entry.contextWindow
     if ((gid === base || entry.id === model) && validWindow(win)) return win
   }
-  for (const entry of models) {
-    const gid = entry.id.trim().replace(/\[1m\]$/, '')
-    const win = entry.contextWindow
-    if (gid.split('/').pop() === base.split('/').pop() && validWindow(win)) return win
-  }
+  if (base.includes('/')) return undefined
+  const matches = models.filter((entry) => entry.id.trim().replace(/\[1m\]$/, '').split('/').pop() === base)
+  if (matches.length === 1 && validWindow(matches[0].contextWindow)) return matches[0].contextWindow
   return undefined
 }
 
@@ -83,27 +79,13 @@ export function staticWindowFor(model: string | null): number {
 }
 
 /**
- * Synchronous best guess for the model's window — the LARGER of the discovered window (when
- * this core has been told one) and the family inference. MAX, not "discovered wins": a proxy
- * cataloguing an Anthropic model through the OpenAI convention often reports the
- * capability-API 200k for a 1M-eligible model, and the family rule exists precisely because
- * the id alone cannot witness that. The meter's job is the true denominator; taking the
- * larger never SHRINKS a number either source asserts, and a truth below the guess only
- * under-reports fill (conservative), never over-reports it. The autocompact env does not
- * flow through here — it reads the catalogue directly (`gatewayModelsForCurrent`), so this
- * rule never widens what the CLI compacts against.
+ * A matching discovery record owns the window, even below native Claude's default or family
+ * estimate. Provider aliases can use any name; a familiar family name or [1m] launch marker
+ * must not overwrite the backend's reported limit. Keep the native fallback only without
+ * discovered metadata. The autocompact environment also reads discovery directly.
  */
 export function cachedWindowFor(model: string | null): number {
-  const discovered = gatewayWindowFor(model)
-  // When discovery MATCHES the id, compute the family floor on the SUFFIX-STRIPPED base: the
-  // `[1m]` marker is how a launcher advertises a large window, and the discovered record is a
-  // better witness than that marker — escalation from it would disagree with the
-  // CLAUDE_CODE_AUTO_COMPACT_WINDOW the CLI actually compacts against. Stripping only under a
-  // known record preserves the never-shrink rule (an Anthropic id catalogued at 200k still
-  // floors at its family 1M) while dropping the marker's escalation. WITHOUT a matching
-  // record the raw id feeds the family table unchanged.
-  const family = staticWindowFor(discovered !== undefined && model ? model.replace(/\[1m\]$/, '') : model)
-  return discovered !== undefined ? Math.max(discovered, family) : family
+  return gatewayWindowFor(model) ?? staticWindowFor(model)
 }
 
 // ---------------------------------------------------------------------------------------------

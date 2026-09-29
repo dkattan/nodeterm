@@ -51,39 +51,21 @@ export const STATE_LABEL: Record<StatusKind, string> = {
   unknown: 'Unknown'
 }
 
-/**
- * The status-MODE section a row falls in. Distinct from `StatusKind` (which drives the project-mode
- * dot/glyph) because a section also reflects the `unread` mark: a finished turn you have not looked
- * at gets its own **Unread** section so it is easy to find, separate from the read-and-idle ones.
- */
-export type StatusGroup = 'attention' | 'unread' | 'working' | 'idle' | 'unknown'
+/** Status sections depend on agent activity, so reading a session cannot move it. */
+export type StatusGroup = 'attention' | 'working' | 'idle' | 'unknown'
 
-/**
- * Section display order in status-grouping mode: what needs you first, then what is new for you,
- * then what is live, then the settled ones. Unread sits high (second) so unlooked-at results are
- * prominent even though, by membership priority, a still-RUNNING session stays under Running.
- */
-const STATUS_GROUP_ORDER: StatusGroup[] = ['attention', 'unread', 'working', 'idle', 'unknown']
+const STATUS_GROUP_ORDER: StatusGroup[] = ['attention', 'working', 'idle', 'unknown']
 
 const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
   attention: 'Need attention',
-  unread: 'Unread',
   working: 'Running',
   idle: 'Idle',
   unknown: 'Unknown'
 }
 
-/**
- * Bucket a row for the status-mode sections. Membership priority (first match wins), which is NOT
- * the display order: `attention` (you must act) → `working` (a live turn is Running, not Unread,
- * matching the project-mode glyph) → `unread` (finished/settled but unlooked-at) → `idle` (a
- * finished turn already seen) → `unknown` (no hook signal). So a finished-and-unread session lands
- * in Unread, a working one stays in Running even if flagged, and a read-done one is Idle.
- */
-export function sessionStatusGroup(kind: StatusKind, unread: boolean): StatusGroup {
+export function sessionStatusGroup(kind: StatusKind): StatusGroup {
   if (kind === 'attention') return 'attention'
   if (kind === 'working') return 'working'
-  if (unread) return 'unread'
   if (kind === 'done') return 'idle'
   return 'unknown'
 }
@@ -297,6 +279,9 @@ export interface SessionRowVM {
    * reported in this run — when its last hook event landed before the restart (`lastSeen.at`). Sort
    * key within a section, and the age label. Absent when neither is known.
    */
+  /** History is visibly labeled and never treated as an authoritative live state. */
+  historicalStateLabel?: string
+  /** Last observed agent update; old stores fall back to their current transition timestamp. */
   statusUpdatedAt?: number
   /** Which clock `statusUpdatedAt` is (see `StatusClockKind`); absent when there is none. */
   statusClock?: StatusClockKind
@@ -376,7 +361,13 @@ function toRow(
 ): SessionRowVM {
   // Workflow state and read state are deliberately independent. `done` means the agent finished a
   // turn and is waiting for a new user prompt; `unread` only controls notification/read affordances.
-  const statusKind = sessionStatusKind(status?.state)
+  const historical = !!project && status?.state === undefined && status?.lastKnownState !== undefined
+  const observed = historical ? status.lastKnownState : status?.state
+  // An old Running event says nothing about what the process is doing now. Keep it Unknown.
+  const statusKind = sessionStatusKind(historical && observed === 'working' ? undefined : observed)
+  const historicalStateLabel = historical
+    ? `Last seen ${observed === 'done' ? 'Idle' : STATE_LABEL[sessionStatusKind(observed)]}`
+    : undefined
   return {
     id: n.id,
     title: n.title,
@@ -385,9 +376,11 @@ function toRow(
     icon: n.icon,
     isAgent: !!n.agentId,
     statusKind,
-    stateLabel: STATE_LABEL[statusKind],
-    // Transition clock first; the "last seen" one only while this run has seen no transition.
-    statusUpdatedAt: status?.lastEventAt ?? status?.lastSeen?.at,
+    stateLabel: historicalStateLabel ?? STATE_LABEL[statusKind],
+    historicalStateLabel,
+    // Display-history clock first (persisted), then the live transition clock, then the
+    // "last seen" one while this run has seen no transition. `statusClockOf` classifies which.
+    statusUpdatedAt: status?.lastUpdateAt ?? status?.lastEventAt ?? status?.lastSeen?.at,
     ...statusClockOf(status),
     unread: !!status?.unread,
     session: status?.session,
@@ -550,7 +543,7 @@ export interface StatusSection {
  * Build the status-grouped session list: every project's terminal nodes flattened into one list,
  * bucketed by live agent status so sessions needing attention float to the top. Project walls and
  * canvas sub-group frames are dropped — this is a flat regrouping keyed on status, not a
- * re-sort within project. Within a section, rows are ordered by most-recent state transition first,
+ * re-sort within project. Within a section, rows are ordered by most-recent agent update first,
  * so the freshest work in each bucket is easiest to reach.
  *
  * Status comes from the same global `statusById` map `buildSessionList` reads; for local-core
@@ -574,8 +567,7 @@ export function buildStatusList(
     !needle || nameMatched.has(projectId) || matches(r, needle)
 
   // Flatten every project's terminal nodes into status-tagged rows. Canvas sub-group frames are
-  // ignored here — status mode is flat by design. The project index rides alongside (not on the
-  // VM) so we can sort by project store-order without a scratch field.
+  // ignored here — status mode is flat by design, including when timestamps are missing.
   //
   // OWNERSHIP & DEDUP: a node belongs to the project whose persisted `p.nodes` contains it. The
   // active project layers its live React Flow nodes (`liveActiveNodes`) on TOP of its persisted
@@ -586,21 +578,18 @@ export function buildStatusList(
   // the load effect's setNodes flushes on a later render. In that window a naive "active project =
   // liveActiveNodes" read would tag the stale nodes with the new project's id AND the previous
   // project's `p.nodes` (just committed) would emit them again — the same node twice, under two
-  // project tags. Keying off the persisted owner map and unioning live nodes only for the active
+  // project tags. Keying off the persisted ownership set and unioning live nodes only for the active
   // project means each node id is emitted at most once, owned by its real project, throughout the
   // switch. (project mode hides the dupe behind collapse, which is why it only surfaced here.)
-  const ownerById = new Map<string, { p: ProjectInput; pidx: number }>()
-  projects.forEach((p, pidx) => {
-    for (const n of p.nodes) ownerById.set(n.id, { p, pidx })
-  })
+  const ownedIds = new Set(projects.flatMap((p) => p.nodes.map((n) => n.id)))
 
-  const tagged: { row: SessionRowVM; pidx: number }[] = []
+  const rows: SessionRowVM[] = []
   const seen = new Set<string>()
   // Live title/status overrides for the active project's nodes (newer than the persisted snapshot).
   const liveById = new Map<string, SessionNodeInput>()
   if (liveActiveNodes) for (const n of liveActiveNodes) liveById.set(n.id, n)
 
-  projects.forEach((p, pidx) => {
+  projects.forEach((p) => {
     const isActive = p.id === activeProjectId
     for (const n of p.nodes) {
       if (n.kind !== 'terminal') continue
@@ -611,7 +600,7 @@ export function buildStatusList(
       if (seen.has(node.id)) continue
       seen.add(node.id)
       const row = toRow(node, statusById[node.id], p)
-      if (keep(row, p.id)) tagged.push({ row, pidx })
+      if (keep(row, p.id)) rows.push(row)
     }
   })
   // A node in `liveActiveNodes` that isn't in any project's persisted set (brand-new, not yet
@@ -620,32 +609,29 @@ export function buildStatusList(
   if (liveActiveNodes) {
     const active = projects.find((p) => p.id === activeProjectId)
     if (active) {
-      const activePidx = projects.indexOf(active)
       for (const n of liveActiveNodes) {
-        if (n.kind !== 'terminal' || seen.has(n.id) || ownerById.has(n.id)) continue
+        if (n.kind !== 'terminal' || seen.has(n.id) || ownedIds.has(n.id)) continue
         seen.add(n.id)
         const row = toRow(n, statusById[n.id], active)
-        if (keep(row, active.id)) tagged.push({ row, pidx: activePidx })
+        if (keep(row, active.id)) rows.push(row)
       }
     }
   }
 
-  // Bucket by status GROUP (unread-aware), then newest state transition first. An absent timestamp
-  // is genuinely unknown and sorts last; project store-order + title provide a deterministic
-  // tie-breaker.
-  const byStatus = new Map<StatusGroup, { row: SessionRowVM; pidx: number }[]>()
-  for (const { row, pidx } of tagged) {
-    const group = sessionStatusGroup(row.statusKind, row.unread)
+  // Bucket only by agent status, then newest update first. Missing/tied timestamps
+  // use title + id, never project order: otherwise Unknown recreates project groups.
+  const byStatus = new Map<StatusGroup, SessionRowVM[]>()
+  for (const row of rows) {
+    const group = sessionStatusGroup(row.statusKind)
     const list = byStatus.get(group)
-    if (list) list.push({ row, pidx })
-    else byStatus.set(group, [{ row, pidx }])
+    if (list) list.push(row)
+    else byStatus.set(group, [row])
   }
   for (const list of byStatus.values()) {
     list.sort((a, b) => {
-      const ageOrder = (b.row.statusUpdatedAt ?? -1) - (a.row.statusUpdatedAt ?? -1)
+      const ageOrder = (b.statusUpdatedAt ?? -1) - (a.statusUpdatedAt ?? -1)
       if (ageOrder !== 0) return ageOrder
-      if (a.pidx !== b.pidx) return a.pidx - b.pidx
-      return a.row.title.toLowerCase().localeCompare(b.row.title.toLowerCase())
+      return a.title.toLowerCase().localeCompare(b.title.toLowerCase()) || a.id.localeCompare(b.id)
     })
   }
 
@@ -654,6 +640,6 @@ export function buildStatusList(
   return STATUS_GROUP_ORDER.map((kind) => ({
     kind,
     label: STATUS_GROUP_LABEL[kind],
-    rows: (byStatus.get(kind) ?? []).map((t) => t.row)
+    rows: byStatus.get(kind) ?? []
   }))
 }

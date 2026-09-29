@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import {
   isSafeEnvName,
@@ -14,6 +15,17 @@ describe('sessionEnvFileContent', () => {
     expect(out).toBe(
       "export ANTHROPIC_AUTH_TOKEN='vk-123'\nexport OPENAI_BASE_URL='https://gw.example/v1'\n"
     )
+  })
+
+  it.skipIf(process.platform === 'win32')('clears inherited routing before applying the new policy and custom overrides', () => {
+    const source = sessionEnvFileContent({ CLAUDE_CODE_SUBAGENT_MODEL: 'custom-model' }, [
+      'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'BAD;NAME'
+    ])
+    const output = execFileSync('/bin/sh', ['-c', source +
+      'printf "%s|%s" "$CLAUDE_CODE_SUBAGENT_MODEL" "${CLAUDE_CODE_SUBAGENT_MODEL_FORCE-unset}"'], {
+      env: { CLAUDE_CODE_SUBAGENT_MODEL: 'old-route', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1' }, encoding: 'utf8'
+    })
+    expect(output).toBe('custom-model|unset')
   })
 
   it('fences a hostile value into a single-quoted literal (no command substitution escapes)', () => {

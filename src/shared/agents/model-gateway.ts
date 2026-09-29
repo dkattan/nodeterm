@@ -79,9 +79,8 @@ export interface GatewayModel {
    *  metadata for consumers; absent stays absent, never guessed. */
   maxOutputTokens?: number
   /** Thinking-level metadata the gateway reports for the route (Bifrost's `reasoning` block on
-   *  `/v1/models`). `supportedEfforts` is the ordered list the route accepts and `defaultEffort`
-   *  its own preference; either may be absent, and a model with no reasoning metadata is NOT
-   *  evidence it lacks thinking — consumers must fall back rather than infer a capability. */
+   *  `/v1/models`). `supportedEfforts` lists accepted values and `defaultEffort` its preference.
+   *  Missing metadata leaves effort selection to the CLI instead of assuming a capability. */
   reasoning?: { supportedEfforts: readonly string[]; defaultEffort?: string }
 }
 
@@ -353,11 +352,6 @@ export const CLAUDE_SUBAGENT_ENV_KEYS = [
   'CLAUDE_CODE_EFFORT_LEVEL'
 ] as const
 
-/** The effort level requested when a model carries no discovered reasoning metadata. Kept as a
- *  named constant because `claudeEffortFor`'s fallback and every test pinning the fallback must
- *  not drift apart. */
-export const CLAUDE_SUBAGENT_EFFORT_FALLBACK = 'xhigh'
-
 /** tmux's own stock `update-environment` entries (tmux 3.4 defaults, measured via
  *  `show-options -g`). Assigning the option as a whole REPLACES the array, so the defaults must be
  *  restated or SSH agent forwarding et al. silently break. */
@@ -502,9 +496,8 @@ export function withAgentModel(cmd: string, agentId: AgentId, model: string | un
  * Claude Code autocompact env, sourced ONLY from the gateway's discovered model list.
  *
  * Claude Code sizes its autocompact window off the model id and fires compaction at a default %
- * of that window. A gateway model whose real context window is large (e.g. a 1M model surfaced
- * through a proxy as `vllm/GLM-5.2-NVFP4-MTP[1m]`) would otherwise still use the 200k default and
- * compact a long session early. Two levers fix it, both Claude-Code-specific:
+ * of that window. A gateway model whose discovered context window is large would otherwise
+ * still use the 200k default and compact a long session early. Two Claude-specific levers fix it:
  *
  *  1. A `[1m]` suffix on the model id marks a LARGE window. Appended when the discovered window
  *     is above `AUTOCOMPACT_THRESHOLD` (see the comment at the suffix below for what each lever
@@ -546,13 +539,9 @@ export function claudeAutocompactFor(
   if (window <= AUTOCOMPACT_THRESHOLD) {
     return { modelId: id.replace(/\[1m\]$/, ''), env: {} }
   }
-  // Append the [1m] marker for EVERY above-threshold window — restored 2026-08-31 after the
-  // mid-band "env only" rule measured as a regression: Misc Bugs (5.3 plain, env 400000) still
-  // metered 200k in its status line, so `CLAUDE_CODE_AUTO_COMPACT_WINDOW` does NOT drive the
-  // CLI's own meter, and the suffix is the only lever that resizes it. The env rides alongside
-  // to size the compaction point; the suffix carries the window to the meter. (A suffixed 5.2 in
-  // the field metered ~400k, so the suffix claims the window per model — it is not a fixed 1M
-  // escalation — which also means a mid-band identifier is safe to suffix.)
+  // Every discovered window above Claude's default needs the marker to lift the CLI's
+  // context ceiling. The environment then sets compaction to the discovered backend limit;
+  // the marker alone is not evidence that the backend supports a million tokens.
   // Symmetric strip: a record whose window dropped below the threshold must NOT keep an old
   // suffix — re-launching it would re-claim the large window.
   //
@@ -578,69 +567,72 @@ export function claudeAutocompactFor(
   }
 }
 
-/** The gateway-served alias to prefer for Claude's subagent route when no explicit default is
- *  configured. Our inference box serves reasoning work under this alias; an administrator-defined
- *  id is ordinary catalogue data, so discovery alone cannot know it is THE alias. */
-const CLAUDE_SUBAGENT_PREFERRED_ALIAS = 'reasoning'
-
-/** Choose only a model the current gateway catalogue says it serves. The configured default wins
- *  when present; otherwise the `reasoning` alias when the catalogue lists it (the inference box's
- *  heavy-work route); otherwise sort here so callers need not know how the catalogue was produced. */
-export function claudeSubagentModelFor(
-  models: readonly GatewayModel[],
-  defaultModel?: string
-): string | undefined {
-  const ids = [...new Set(modelsForAgent(models, 'claude').map((model) => model.id.trim()).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right))
-  const preferred = defaultModel?.trim()
-  if (preferred && ids.includes(preferred)) return preferred
-  if (ids.includes(CLAUDE_SUBAGENT_PREFERRED_ALIAS)) return CLAUDE_SUBAGENT_PREFERRED_ALIAS
-  return ids[0]
+export interface ClaudeSubagentSettings {
+  mode: 'parent' | 'model' | 'claude'
+  model?: string
+  force: boolean
 }
 
-/** The highest effort a route accepts — thinking scales with capability, and the list order carries
- *  no ranking of its own. */
-function highestSupportedEffort(supported: readonly string[]): string | undefined {
-  return supported.length ? supported[supported.length - 1] : undefined
+export const DEFAULT_CLAUDE_SUBAGENTS: ClaudeSubagentSettings = { mode: 'parent', force: true }
+
+/** Settings files can be partial or hand-edited. Never manufacture a model selection. */
+export function sanitizeClaudeSubagents(value: unknown): ClaudeSubagentSettings {
+  const v = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const mode = v.mode === 'model' || v.mode === 'claude' ? v.mode : 'parent'
+  const model = typeof v.model === 'string' ? normalizedAgentModel('claude', v.model) : undefined
+  return { mode, ...(model ? { model } : {}), force: typeof v.force === 'boolean' ? v.force : true }
 }
 
-/** The thinking level to request from one discovered model: the route's own `default_effort` when
- *  reported (the provider knows its model), else its highest supported level, else the launcher's
- *  prior static default. Absent reasoning metadata is NOT evidence thinking is unsupported —
- *  discovery omits the block on some served routes — so the fallback is the default, never an
- *  omission: Claude clamps unknown levels itself, and a route that rejects one errors noisily
- *  rather than silently un-thinking every subagent. */
-export function claudeEffortFor(models: readonly GatewayModel[], modelId: string | undefined): string {
+/** Use an advertised default, or the only advertised choice. Multiple choices without a default
+ * carry no preference or ranking, so leave selection to Claude just as when discovery is absent. */
+export function claudeEffortFor(models: readonly GatewayModel[], modelId: string | undefined): string | undefined {
   const base = modelId?.trim().replace(/\[1m\]$/, '')
   const model = models.find((m) => m.id.replace(/\[1m\]$/, '') === base)
-  return (
-    model?.reasoning?.defaultEffort ??
-    (model?.reasoning ? highestSupportedEffort(model.reasoning.supportedEfforts) : undefined) ??
-    CLAUDE_SUBAGENT_EFFORT_FALLBACK
-  )
+  const reasoning = model?.reasoning
+  if (!reasoning) return undefined
+  if (reasoning.defaultEffort) {
+    return reasoning.supportedEfforts.includes(reasoning.defaultEffort)
+      ? reasoning.defaultEffort : undefined
+  }
+  return reasoning.supportedEfforts.length === 1 ? reasoning.supportedEfforts[0] : undefined
 }
 
-/** Build Claude's gateway subagent routing independently from large-context launch handling.
- *  Since Claude Code 2.1.251, an Agent call's explicit model (e.g. `sonnet`) beats SUBAGENT_MODEL.
- *  FORCE (2.1.257+) restores the override, keeping those calls on a model the gateway serves:
- *  https://code.claude.com/docs/en/sub-agents#run-every-subagent-on-one-model
+/** Gateway policy for Claude Agent calls. Parent mode uses FORCE alone so even a later
+ * /model change inside Claude is inherited, including its [1m] suffix. There is no alphabetical
+ * or gateway-default fallback. A specific choice is the only source of SUBAGENT_MODEL.
+ * FORCE requires Claude Code 2.1.257+. Project/custom-agent env remains the final override.
  *
- *  The effort level comes from the selected model's discovered `reasoning` metadata (see
- *  `claudeEffortFor`). This env var affects the parent AND children;
- *  there is no subagent-only effort env. Project/custom-agent env is merged later and can override
- *  the default. With no served route, emit no controls or guessed capabilities. */
+ * Claude shares compaction/effort env between parent and subagents. With a specific model,
+ * cap the shared compaction budget at the smaller discovered window so a child cannot inherit
+ * a larger budget than its backend accepts. */
 export function claudeSubagentEnvFor(
   agentId: AgentId,
   models: readonly GatewayModel[],
-  defaultModel?: string
+  settings: ClaudeSubagentSettings = DEFAULT_CLAUDE_SUBAGENTS,
+  parentModel?: string
 ): Record<string, string> {
   if (capabilityAgentId(agentId) !== 'claude') return {}
-  const model = claudeSubagentModelFor(models, defaultModel)
-  return model ? {
-    [CLAUDE_CODE_SUBAGENT_MODEL_KEY]: model,
-    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
-    CLAUDE_CODE_EFFORT_LEVEL: claudeEffortFor(models, model)
-  } : {}
+  const policy = sanitizeClaudeSubagents(settings)
+  if (policy.mode === 'claude') return {}
+  const env: Record<string, string> = {}
+  const model = policy.mode === 'model' ? policy.model : undefined
+  if (!model) {
+    // An incomplete specific-model setting inherits until a model is selected.
+    env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1'
+  } else {
+    env.CLAUDE_CODE_SUBAGENT_MODEL = claudeAutocompactFor(agentId, model, models).modelId!
+    if (policy.force) env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1'
+  }
+  const windows = [modelContextWindow(parentModel, models), modelContextWindow(model, models)]
+    .filter((window): window is number => window !== undefined)
+  if (windows.length) {
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(Math.min(...windows))
+    env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = AUTOCOMPACT_PCT_OVERRIDE
+  }
+  // This is a shared setting, not a subagent-only effort control.
+  const effort = claudeEffortFor(models, model ?? parentModel)
+  if (effort) env.CLAUDE_CODE_EFFORT_LEVEL = effort
+  return env
 }
 
 /** Current reported window for either plain or `[1m]` spelling of one model id. */

@@ -10,6 +10,12 @@ import {
 
 export type AgentState = 'working' | 'waiting' | 'blocked' | 'done'
 
+/** Historical display metadata. Never authorizes an action or asserts current process state. */
+export interface AgentStatusObservation {
+  state?: AgentState
+  updatedAt: number
+}
+
 // The universal event shape every agent normalizer produces. Agent-specific
 // field names live only inside the per-agent normalizers below.
 export interface NormalizedAgentEvent {

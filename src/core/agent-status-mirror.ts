@@ -4,7 +4,7 @@ import path from 'path'
 import { writeFileAtomic } from './fs-atomic'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
-import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
+import type { AgentState, AgentStatusObservation, NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { ObservedClaudeAccount } from '@shared/types'
 import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 import { parseIdentitySeed } from '@shared/agent-identity-seed'
@@ -2459,6 +2459,13 @@ export function _resetForTest(): void {
   nodeStateChangeListeners.clear()
   nodeNowChangeListeners.clear()
   pendingQuestions.clear()
+}
+
+/** Metadata-only history for the desktop sidebar. Does not replay events or renew their age. */
+export function agentStatusHistory(now = Date.now()): Record<string, AgentStatusObservation> {
+  return Object.fromEntries([...state]
+    .filter(([, e]) => now - e.updatedAt <= EXPIRE_MS)
+    .map(([id, e]) => [id, { state: e.state, updatedAt: e.updatedAt }]))
 }
 
 /** Snapshot the in-memory map. Test-only. */

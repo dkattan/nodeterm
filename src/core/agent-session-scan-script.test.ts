@@ -9,7 +9,7 @@ describe('agent session scanner', () => {
   it('keeps the pane shell pid separate from the foreground agent pid', () => {
     const rows = parseProcessList(`
       79108 79108 Ss   -zsh -zsh
-      79141 79141 S+   claude claude --resume session --model vllm/glm[1m]
+      79141 79141 S+   claude claude --resume session --model provider/model[1m]
       79407 79141 S+   uv uv run server.py
     `)
     expect(classifyProcesses(rows, 79108, 'claude')).toEqual({
@@ -72,7 +72,7 @@ describe('agent session scanner', () => {
   })
 
   it('extracts both long and short model flags from live argv', () => {
-    expect(extractModelArg('claude --resume x --model vllm/glm[1m]')).toBe('vllm/glm[1m]')
+    expect(extractModelArg('claude --resume x --model provider/model[1m]')).toBe('provider/model[1m]')
     expect(extractModelArg('codex resume x -m gpt-5.6')).toBe('gpt-5.6')
     expect(extractModelArg('claude --model="model with spaces"')).toBe('model with spaces')
   })
@@ -169,7 +169,7 @@ describe('agent session scanner', () => {
       pane: { nodeId: 'term-1' },
       node: {
         agentId: 'claude',
-        agentLaunchModel: 'vllm/glm[1m]',
+        agentLaunchModel: 'provider/model[1m]',
         agentLaunchContextWindow: 400_000
       },
       env: {
@@ -191,7 +191,7 @@ describe('agent session scanner', () => {
       pane: { nodeId: 'term-1' },
       node: {
         agentId: 'claude',
-        agentLaunchModel: 'vllm/glm[1m]',
+        agentLaunchModel: 'provider/model[1m]',
         agentLaunchContextWindow: 400_000
       },
       env: {
@@ -200,7 +200,7 @@ describe('agent session scanner', () => {
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000'
       },
       process: { state: 'agent-running' },
-      processModel: 'vllm/glm[1m]',
+      processModel: 'provider/model[1m]',
       screenWindow: 400_000
     })
     expect(audited.findings).toEqual([])
