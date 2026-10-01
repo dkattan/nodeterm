@@ -197,7 +197,25 @@ export interface PtyCreateOptions {
    * shrink everyone's terminal). It is still a subscriber and is told the authoritative size.
    */
   sizeVote?: false
-}
+  /**
+   * This create must JOIN an already-live session for `persistKey` — never spawn a new one.
+   *
+   * The cross-project projection (ticket 05) is a VIEWER of another project's node, not its owner:
+   * B owns the `nt-<bNodeId>` session, and A's projection co-attaches to it. If B's session is not
+   * live yet (B's canvas never mounted, or a post-reboot cold start), the projection must refuse
+   * rather than become the spawner of B's session — a projection that spawned would steal ownership
+   * (the pane-ownership ledger would record A's project as the owner) and the node would run under
+   * A's resolved context instead of B's. The refusal (`PtyCreateResult.unavailable: 'no-session'`)
+   * is the honest answer: the projection shows a placeholder and retries once B mounts the session.
+   *
+   * Deliberately gated in `create()` AFTER the in-flight barrier (so a projection racing B's own
+   * spawn waits for it and then joins, rather than refusing a session that is coming up right now)
+   * and AFTER the tombstone check (a `closed` refusal is the more specific answer for a node B
+   * deleted). Unlike `requireRemote` — which refuses only the spawn branch and still allows a
+   * co-attach join — this refuses the WHOLE create when no live session exists, because there is no
+   * valid spawn branch for a projection at all.
+   */
+  requireExisting?: boolean}
 
 /** A tmux pane's cursor, as tmux reports it: 0-based column/row within the pane, plus whether the
  *  application currently wants it shown (`#{cursor_flag}`). */
@@ -379,9 +397,10 @@ export interface PtyCreateResult {
    * `'join-only'`: `PtyCreateOptions.joinOnly` was set (a hosted-relay viewer) and no running
    * session could be confirmed to join or reattach to — either it is gone, or its existence could
    * not be checked — so nothing was started. Not a lost connection.
+   * `'no-session'`: `requireExisting` was set and no live session for this node id exists (and none
+   * came up while waiting on an in-flight spawn) — the ticket-05 projection's honest answer.
    */
-  unavailable?: 'ssh' | 'codex-account' | 'join-only'
-}
+  unavailable?: 'ssh' | 'codex-account' | 'join-only' | 'no-session'}
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
 export interface RecycledInfo {

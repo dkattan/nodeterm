@@ -2295,6 +2295,15 @@ export class PtyManager {
     // AFTER the in-flight barrier so a create racing the owner's own respawn joins it instead.
     const tomb = this.liveTombstone(key)
     if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
+    // A projection of a FOREIGN node (ticket 05's `requireExisting`) must never SPAWN its target's
+    // session — B owns the `nt-<bNodeId>` session, and A's projection co-attaches to it or shows a
+    // placeholder. Spawning from here would steal B's pane-ownership record and run the node under
+    // A's resolved context instead of B's. Unlike `requireRemote` (refuses only the spawn branch),
+    // this refuses the WHOLE create — there is no valid spawn branch for a projection at all.
+    // Gated AFTER the in-flight barrier above (so a projection racing B's own spawn JOINS it and
+    // then this check never fires) and after the tombstone check (a closed refusal is the more
+    // specific answer for a node B deleted).
+    if (options.requireExisting) return { sessionId: '', fresh: false, unavailable: 'no-session' }
     const spawn = this.spawnNew(clientId, options)
     this.inflight.set(key, spawn)
     // Clear on settle — INCLUDING on failure, or a single failed spawn would leave a rejected
