@@ -963,7 +963,9 @@ export function createAgentStatusSession(
         // one must reach disk, or a relaunch would restore a hibernated/paused node that has been
         // demonstrably running since). `lastUpdateAt`/`lastKnownState` ride the main table's save
         // whenever it does run; the `lastSeen` CLOCK has its own debounced key below.
-        if (prev.hibernated || prev.paused || prev.dropped || prev.sessionEnded) save(byId)
+        // A reset (state === undefined) is a session boundary: it just cleared lastKnownState,
+        // and that clearing must reach disk or the next load resurrects old history.
+        if (state === undefined || prev.hibernated || prev.paused) save(byId)
         scheduleClockSave()
         return { byId }
       })

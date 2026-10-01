@@ -69,18 +69,31 @@ describe('status sections after reopening and reading sessions', () => {
 })
 
 describe('historical display remains separate from live lifecycle state', () => {
-  it('restores a finished session as visibly historical Idle without live clocks or identity', () => {
-    vi.spyOn(Date, 'now').mockReturnValue(1_000)
+  it('a restored hook clock is a "seen" label in Unknown, never live history or identity', () => {
+    // Upstream #1060's reviewed model: a bare hook transition writes ONLY the debounced clock
+    // key, and a restored clock asserts nothing about the live state — the row stays Unknown,
+    // labeled "Last hook event … before nodeterm restarted". The main-table history
+    // (lastKnownState/lastUpdateAt) comes from observeHistory, not from hook events.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000)
     const { store } = createAgentStatusSession('historical')
+    // Bare hook transitions never write the main table (upstream #1060): history persists only
+    // through observeHistory — which itself refuses to replace a live state, so the session
+    // boundary (the CLI exiting, state → undefined) comes first, exactly as in real usage.
     store.getState().setState('older', 'done', 'claude', false, undefined, true)
+    store.getState().setState('older', undefined, 'claude')
+    // Strictly newer than the transition stamp, or the history observation reads as stale —
+    // and not in the mocked future, or the freshness guard refuses it.
+    clock.mockReturnValue(2_000)
+    store.getState().observeHistory({ older: { state: 'done', updatedAt: 1_200 } })
     const restored = createAgentStatusSession('historical').store
-    const row = buildStatusList(projects, null, 'project', restored.getState().byId, '')
-      .find((s) => s.kind === 'idle')!.rows[0]
-    expect(row.id).toBe('older')
-    expect(row.historicalStateLabel).toBe('Last seen Idle')
-    expect(restored.getState().byId.older).toMatchObject({ lastKnownState: 'done', lastUpdateAt: 1_000 })
+    const restoredEntry = restored.getState().byId.older
+    expect(restoredEntry).toMatchObject({ lastKnownState: 'done', lastUpdateAt: 1_200 })
     for (const key of ['state', 'stateAt', 'stateVerified', 'lastEventAt', 'pendingId'])
-      expect(restored.getState().byId.older).not.toHaveProperty(key)
+      expect(restoredEntry).not.toHaveProperty(key)
+    const rows = buildStatusList(projects, null, 'project', restored.getState().byId, '')
+      .find((s) => s.kind === 'idle')!.rows
+    expect(rows.map((r) => r.id)).toContain('older')
+    expect(rows.find((r) => r.id === 'older')!.historicalStateLabel).toBe('Last seen Idle')
   })
 
   it('does not let a delayed snapshot overwrite a newer hook or session reset', () => {
