@@ -854,10 +854,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--run-now]` — open N plain terminals. `--cmd` requires verified node identity.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open`,
+    '- `open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--title T] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--title T] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
-    '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
+    '  hands its worktree path down as the cwd. `--title T` names the node at creation (pinned, so the',
+    '  agent\'s own session name does not overwrite it) — pass it when you open one station per worktree',
+    '  so each is distinguishable instead of all defaulting to the agent label. For `--count N > 1` the',
+    '  2nd..Nth get a ` #2`, ` #3`… suffix. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has finished a turn SUCCESSFULLY. It is',
     '  roped to each listed station (one edge, dashed while it waits, solid once it runs) and can read',
     '  their work with get-linked-context when it wakes — nothing to `link`. Use it for "B needs what',
@@ -1066,10 +1069,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'start only on a SUCCESSFUL upstream, and tell every station you open to finish with',
     '`report-outcome`. Then break the task into 2-5 workstreams;',
     'per stream `open-worktree --branch <slug>` then `open-agent --agent claude --group <groupId>',
-    '--prompt "<concrete task>"` (each stream on its own branch, no tree conflicts). Members land',
-    'in grid slots inside the frame automatically; align the frames themselves with',
+    '--prompt "<concrete task>" --title "<short subject>"` (each stream on its own branch, no tree',
+    'conflicts; `--title` names the station so it is distinguishable, not a bare "Claude"/"Codex").',
+    'Members land in grid slots inside the frame automatically; align the frames themselves with',
     '`arrange --nodes <groupId,…> --layout row` (pass sibling GROUP ids from one container)',
-    'and `rename` each by subject. When a station goes idle, READ what it did through the',
+    'and `rename` any you did not title. When a station goes idle, READ what it did through the',
     'context link (the linked-context CLI — see the get-linked-context section in your global',
     'agent instructions) and reconcile the streams into ONE synthesis yourself; a station you',
     'never read is one you cannot vouch for. The user merges when a stream is done;',
@@ -1418,10 +1422,14 @@ Verbs:
 - \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--run-now]\` — open N plain terminals (default 1). \`--cmd\` requires verified node identity.
-- \`open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--title T] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--title T] [--model M] [--group <id>] [--after <id,id>] [--after-success <id,id>] [--success-deadline <90m|12h|3d>] [--after-pr <N:checks|N:merged>] [--pr-deadline <90m|12h|3d>] [--project <id>] [--issue <owner/repo#N | #N>] [--run-now]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
+  \`--title T\` names the node at creation (pinned — the agent's own session name will not overwrite
+  it). Pass it whenever you open one station per worktree, so each is distinguishable instead of
+  every station defaulting to the agent label ("Codex", "Claude", …). For \`--count N > 1\` the
+  2nd..Nth get a \` #2\`, \` #3\`… suffix.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has finished a turn successfully — that is how you express "B needs what A produces" without
   sitting in a poll loop. The armed node is roped to each listed station (one edge,
@@ -1732,13 +1740,15 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
 1. Split the task into the independent workstreams step 0 identified.
 2. Per workstream, give it its own branch + kitchen station:
    \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then
-   \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>"\`.
-   Each stream now works on its own branch in its own worktree group — no tree conflicts.
+   \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>" --title "<short subject>"\`.
+   \`--title\` names the station at creation so each is distinguishable (not a bare "Claude"/"Codex");
+   the group frame is already labelled with the branch. Each stream now works on its own branch in
+   its own worktree group — no tree conflicts.
 3. Keep the kitchen tidy: members opened with \`--group\` land in neat grid slots inside the
    frame automatically (the frame grows to fit), and successive \`open-worktree\` frames fan
    out side by side — after opening all stations, align the frames with
    \`arrange --nodes <groupId,groupId,…> --layout row\` (pass sibling GROUP ids from one
-   container, not their children). \`rename\` each group by subject.
+   container, not their children). \`rename\` any station or group you did not title with \`--title\`.
 4. Track progress (their status badges show working/waiting) and coordinate.
 5. Collect the results yourself. Every station you opened is context-linked to you, so when
    one goes idle, read what it actually did with the

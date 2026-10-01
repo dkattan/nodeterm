@@ -18749,6 +18749,13 @@ export function Canvas() {
         <SpawnTeamDialog
           worktreesAvailable={!isSshProject && !!worktreeRepoRoot}
           worktreeNote={isSshProject ? WORKTREE_SSH_HINT : 'not a git repository'}
+          // Same default the submit handler resolves a conductor launch from: this project's
+          // own `agents.defaultAgentId`, else the global one.
+          defaultAgent={resolveNewNodeAgent(
+            undefined,
+            useProjects.getState().activeProjectId,
+            useSettings.getState().settings
+          )}
           onSubmit={spawnTeam}
           onCancel={() => setSpawnTeamDialog(null)}
         />

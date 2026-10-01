@@ -104,6 +104,7 @@ describe('deliverFromControl', () => {
     expect(deps.rec.sent[0].payload).toContain('hello')
   })
 
+
   it('refuses when the per-project switch is off — before any pane is touched', async () => {
     const deps = fakeDeps({ messagingEnabled: () => false })
     const { outcome, reply } = await deliverFromControl(req(), deps)

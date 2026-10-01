@@ -289,6 +289,7 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('close-worktree')).toBe(false)
   })
 
+
   it('branch requires --node, and is not destructive', () => {
     expect(parseControlRequest('branch', {})).toEqual({ error: 'branch requires --node <id>' })
     expect(parseControlRequest('branch', { node: 'n1' })).toEqual({
@@ -626,6 +627,16 @@ describe('parseControlRequest', () => {
       // now compares, so the text has to say so, or callers keep building that workaround.
       expect(body.toLowerCase()).toContain('already named')
       expect(body.toLowerCase()).toContain('no-op')
+    }
+  })
+
+  it('both agent-facing texts document the --title flag on open-claude/open-agent', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // A conductor opening one agent per worktree gets N nodes all named "Codex"/"Claude" without
+      // --title. The skill must tell agents to name each station at creation (pinned, titleAuto off).
+      expect(body).toMatch(/open-claude.*--title/)
+      expect(body).toMatch(/open-agent.*--title/)
+      expect(body.toLowerCase()).toContain('pinned')
     }
   })
 
