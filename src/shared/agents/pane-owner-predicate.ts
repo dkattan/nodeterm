@@ -199,12 +199,26 @@ export function binariesFor(
     // here used to throw inside the desktop gates). `mirrorCustomAgents` coerces the same way.
     const launchCmd = typeof custom.launchCmd === 'string' ? custom.launchCmd : ''
     if (!launchCmd.trim()) {
+      // BLANK command with a base harness runs the base's own command — `resolveAgentConfig`
+      // (`shared/agents/custom-agent.ts`) resolves `launchCmd.trim() || base.launchCmd`, so the
+      // pane runs e.g. `claude`. Own property only: `baseAgent` is hand-editable JSON, and
+      // `constructor` must not index the table.
       const base = custom.baseAgent
       return base && Object.prototype.hasOwnProperty.call(AGENT_BINARIES, base) ? AGENT_BINARIES[base] : null
     }
     const name = binaryFromLaunchCmd(launchCmd)
-    return name ? [name] : null
-  }
+    // A base-backed custom command is commonly a wrapper that execs (or resumes directly into)
+    // the base harness — the pane may report either `claude-wopr` or `claude`, and both are
+    // honest identities for that configured agent. Resolve the latter through the canonical
+    // built-in binary table (the same base-agent declaration that supplies capabilities), not a
+    // copied per-feature list. This also lets a shell-script wrapper verify as the base.
+    if (name) {
+      const base = custom.baseAgent
+      const baseBinaries =
+        base && Object.prototype.hasOwnProperty.call(AGENT_BINARIES, base) ? AGENT_BINARIES[base] : []
+      return [name, ...baseBinaries.filter((b) => b !== name)]
+    }
+    return null  }
   // A `custom:` id we were given no definition for is unknowable — deriving from the id would yield
   // `custom:<uuid>`, a name that matches nothing, i.e. `not-agent`: a terminal answer to a question
   // we never actually asked. Anything else is treated as its own launch command, which is what

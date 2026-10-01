@@ -33,7 +33,7 @@ describe('mirrorCustomAgents', () => {
       ['custom:proxy', ['claude']],
       ['custom:npx', ['my-agent']],
       ['custom:shell', []], // unnameable ⇒ empty ⇒ the phone refuses, never guesses
-      ['custom:bin', ['aider']]
+      ['custom:bin', ['aider', 'grok']] // wrapper + base harness, the same union the predicate verifies
     ])
   })
 
