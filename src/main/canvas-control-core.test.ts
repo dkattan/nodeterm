@@ -650,16 +650,6 @@ describe('parseControlRequest', () => {
     }
   })
 
-  it('both agent-facing texts document the --title flag on open-claude/open-agent', () => {
-    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
-      // A conductor opening one agent per worktree gets N nodes all named "Codex"/"Claude" without
-      // --title. The skill must tell agents to name each station at creation (pinned, titleAuto off).
-      expect(body).toMatch(/open-claude.*--title/)
-      expect(body).toMatch(/open-agent.*--title/)
-      expect(body.toLowerCase()).toContain('pinned')
-    }
-  })
-
   it('both agent-facing texts document the messaging verbs and the outermost-frame convention', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       for (const frag of ['`send --node', '`reply --node', '`notify --node']) {

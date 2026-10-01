@@ -161,7 +161,6 @@ import {
   MODEL_GATEWAY_ENV_KEYS,
   modelGatewayEnv,
   tmuxUpdateEnvironmentLine,
-  type GatewayModel
 } from '../shared/agents/model-gateway'
 import { leadPaneHookLines } from '../shared/tmux-lead-pane'
 import {
@@ -1075,12 +1074,6 @@ export class PtyManager {
   private overridesInFlight = new Map<string, Promise<ProjectSpawnOverrides | null>>()
   /** "Which SSH host owns this node?", from the persisted index — see `setRemoteNodeOwner`. */
   private remoteNodeOwner: RemoteNodeOwnerResolver | null = null
-  /** Discovered gateway models keyed by the (trimmed) gateway baseUrl — populated by model
-   *  discovery and read at spawn time to inject Copilot BYOK max-context env vars
-   *  (COPILOT_PROVIDER_MAX_PROMPT_TOKENS / COPILOT_PROVIDER_MAX_OUTPUT_TOKENS). The limits live on
-   *  the model objects; a model the gateway never reported limits for is absent there, and the env
-   *  vars are omitted rather than guessed. */
-  private gatewayModelCache = new Map<string, GatewayModel[]>()
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1773,20 +1766,7 @@ export class PtyManager {
    *  spawn-time env injection (Copilot BYOK max-context) can read the reported token limits without
    *  re-discovering on every spawn. A successful discovery REPLACES the cache for that URL; an
    *  empty/failed result clears it so stale limits are not served after the gateway changes. */
-  setGatewayModels(baseUrl: string, models: GatewayModel[]): void {
-    const key = baseUrl.trim()
-    if (!key) return
-    if (models.length) this.gatewayModelCache.set(key, models)
-    else this.gatewayModelCache.delete(key)
-  }
-
   /** Resolve the discovered models for the CURRENTLY CONFIGURED gateway, or [] if none cached. */
-  private gatewayModelsForCurrent(): GatewayModel[] {
-    const gw = this.getSettings().modelGateway
-    if (!gw?.baseUrl) return []
-    return this.gatewayModelCache.get(gw.baseUrl.trim()) ?? []
-  }
-
   /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
    *  successful probe (the banner's install command finishing, or init()'s post-PATH-probe re-run
    *  finding a tmux only the login shell knew about) brings tmux up for NEW sessions without an
@@ -3644,8 +3624,7 @@ export class PtyManager {
             options.agentBaseId ?? options.agentId,
             options.agentModel,
             process.env as Record<string, string | undefined>,
-            this.getModelGatewaySecret(),
-            this.gatewayModelsForCurrent()
+            this.getModelGatewaySecret()
           )
         : {}
     if (!options.sshRemote) {

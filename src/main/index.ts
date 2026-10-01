@@ -1444,13 +1444,7 @@ app.whenReady().then(async () => {
   sshStore.registerIpc()
   // Gateway discovery/credential IPC (peer-reachable by design; the renderer never receives a
   // stored literal key, and discovery resolves key REFERENCES only for the saved gateway URL).
-  registerAgentEnvIpc(
-    () => settingsStore.get().modelGateway,
-    gatewayCredentials,
-    // Cache discovered gateway models so spawn-time Copilot BYOK env injection can read the
-    // reported context/output token limits (COPILOT_PROVIDER_MAX_PROMPT/OUTPUT_TOKENS).
-    (baseUrl, models) => ptyManager.setGatewayModels(baseUrl, models)
-  )
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
   // The `${env:VAR}` snapshot for custom-agent expansion is DESKTOP-WINDOW-ONLY, so it is a raw
   // `ipcMain.handle` on purpose (see the handler-table comment in platform-electron.ts): a
   // `platform().handle` registration would answer relay peers too — a paired phone or remote tab

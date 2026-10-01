@@ -18439,19 +18439,6 @@ export function Canvas() {
 
       <SessionsSidebar
         open={sessionsOpen}
-        // An adoptable row's Bind: the sidebar row is only rendered for the ACTIVE project, so the
-        // dialog-less target is the canvas itself (a fresh group frame at the view center) — the
-        // same flow `bindExistingWorktree` runs from the creation dialog, minus its dialog guards.
-        onBindWorktree={(entry) => {
-          const { repoRoot, entries } = useWorktrees.getState()
-          if (!repoRoot) return
-          const wt = worktreeFromEntry(entry, repoRoot, resolveBaseRef(entries))
-          if (!wt) {
-            setNotice({ kind: 'error', text: 'That worktree has a detached HEAD. Check out a branch in it first.' })
-            return
-          }
-          attachWorktree({ groupId: null, at: viewCenter() ?? undefined }, wt)
-        }}
         pinned={sessionsPinned}
         liveActiveNodes={liveActiveNodes}
         onTogglePin={toggleSessionsPin}
@@ -18786,13 +18773,6 @@ export function Canvas() {
         <SpawnTeamDialog
           worktreesAvailable={!isSshProject && !!worktreeRepoRoot}
           worktreeNote={isSshProject ? WORKTREE_SSH_HINT : 'not a git repository'}
-          // Same default the submit handler resolves a conductor launch from: this project's
-          // own `agents.defaultAgentId`, else the global one.
-          defaultAgent={resolveNewNodeAgent(
-            undefined,
-            useProjects.getState().activeProjectId,
-            useSettings.getState().settings
-          )}
           onSubmit={spawnTeam}
           onCancel={() => setSpawnTeamDialog(null)}
         />
