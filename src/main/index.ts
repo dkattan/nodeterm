@@ -2109,6 +2109,16 @@ app.whenReady().then(async () => {
   // on the next request. Wired OUTSIDE the try: it is not part of arming the secret, and a machine
   // running in legacy mode is precisely one whose owner may need it.
   hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
+  // opencode re-resolution: its v2 runtime runs plugins inside ONE shared `opencode serve
+  // --service` daemon, so every hook POST carries the nodeId of whichever pane started that
+  // daemon — stale for every pane after it. The plugin compensates by sending `directory`
+  // (the session's project cwd); the workspace maps that back to the owning node. See
+  // WorkspaceStore.nodeForAgentDirectory.
+  hookServer.setNodeResolver((agentId, payload) => {
+    if (agentId !== 'opencode') return ''
+    const dir = typeof payload.directory === 'string' ? payload.directory : ''
+    return (dir && workspaceStore.nodeForAgentDirectory(agentId, dir)) || ''
+  })
   try {
     const nodeAuthSecret = await loadOrCreateNodeAuthSecret()
     hookServer.setNodeAuthSecret(nodeAuthSecret)

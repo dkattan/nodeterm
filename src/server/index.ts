@@ -708,6 +708,13 @@ export async function startServer(
   // Same escape hatch as the desktop, wired OUTSIDE the try for the same reason: it is not part of
   // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
   hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
+  // opencode re-resolution (see WorkspaceStore.nodeForAgentDirectory): the shell's workspace is
+  // what maps the plugin's `directory` back to the owning node. Same seam as the desktop.
+  hookServer.setNodeResolver((agentId, payload) => {
+    if (agentId !== 'opencode') return ''
+    const dir = typeof payload.directory === 'string' ? payload.directory : ''
+    return (dir && workspaceStore.nodeForAgentDirectory(agentId, dir)) || ''
+  })
   try {
     // The whole node-identity arming (node secret + the S6 Codex record secret + node tokens) lives
     // in one REAL production function so the boot test can drive the shipped path rather than a

@@ -420,6 +420,40 @@ describe('normalizeOpencode', () => {
   it('ignores unknown events', () => {
     expect(normalizeFor('opencode', ocEnv({ event: 'tui.toast.show' }))).toBeNull()
   })
+
+  // ── v2 (2.x) wire events. Measured on 2.0.19 against a live daemon: the turn lifecycle is
+  // session.execution.* (durable), the turn start is session.inbox.enqueued with item.type=user,
+  // and mid-turn activity is session.tool.called. The schema's session.status never actually
+  // publishes; the plugin maps it to the v1 names anyway if it ever fires.
+  it('maps the v2 execution lifecycle to working/done (errored/interrupted annotations)', () => {
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.execution.started', sessionID: 'ses_v2' })))
+      .toMatchObject({ kind: 'state', state: 'working' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.execution.succeeded', sessionID: 'ses_v2' })))
+      .toMatchObject({ kind: 'state', state: 'done' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.execution.failed', sessionID: 'ses_v2' })))
+      .toMatchObject({ kind: 'state', state: 'done', errored: true })
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.execution.interrupted', sessionID: 'ses_v2' })))
+      .toMatchObject({ kind: 'state', state: 'done', interrupted: true })
+    // No error text is claimed: the flag is the whole annotation (same rule as claude's errored).
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.execution.failed' }))?.lastMessage).toBeUndefined()
+  })
+
+  it('maps the v2 inbox-enqueued user message to working + newTurn (assistant/subagent items ignored)', () => {
+    expect(
+      normalizeFor('opencode', ocEnv({ event: 'session.inbox.enqueued', sessionID: 'ses_v2', item: { type: 'user' } }))
+    ).toMatchObject({ kind: 'state', state: 'working', newTurn: true })
+    // A non-user item (subagent work landing in the inbox) is not a turn start.
+    expect(
+      normalizeFor('opencode', ocEnv({ event: 'session.inbox.enqueued', item: { type: 'subagent' } }))
+    ).toBeNull()
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.inbox.enqueued' }))).toBeNull()
+  })
+
+  it('maps the v2 tool-called event to working (no newTurn)', () => {
+    const e = normalizeFor('opencode', ocEnv({ event: 'session.tool.called', sessionID: 'ses_v2' }))
+    expect(e).toMatchObject({ kind: 'state', state: 'working' })
+    expect(e?.newTurn).toBeUndefined()
+  })
 })
 
 describe('normalizeCodex — request_user_input (ask-the-user)', () => {

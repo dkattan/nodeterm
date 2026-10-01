@@ -678,13 +678,19 @@ export function normalizeCopilot(env: RawHookEnvelope): NormalizedAgentEvent | n
 }
 
 // opencode plugin payload (see core/agents/hooks/opencode.ts). The managed plugin forwards
-// { event, sessionID?, role? } per hook; field names beyond `event` are read defensively —
+// { event, sessionID?, directory? } per hook; field names beyond `event` are read defensively —
 // opencode's event payload shapes are not a contract, so the event NAME carries the mapping.
+// `directory` (the session's project cwd, from the bus event's location) is the node-routing
+// fact: the plugin runs inside a shared `opencode serve --service` daemon whose NODETERM_* env
+// was frozen at the daemon's start, so the POSTed nodeId is whatever pane started THAT daemon —
+// stale for every later pane. The shells re-resolve via opencodeNodeForDirectory (core).
 interface OpencodePayload {
   event?: string
   sessionID?: string
   session_id?: string
   role?: string
+  directory?: string
+  item?: { type?: string }
 }
 
 export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | null {
@@ -692,6 +698,27 @@ export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | 
   const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.sessionID ?? p.session_id }
 
   if (p.event === 'session.created') return { ...base, kind: 'session', sessionPhase: 'start' }
+  // ── v2 bus (2.x), MEASURED on 2.0.19 against a live daemon (SSE capture, full turn):
+  // the turn lifecycle is session.execution.* (durable). The schema's session.status
+  // {idle|busy|retry} never actually publishes, and session.idle is deprecated — the plugin
+  // forwards them if they ever appear, but execution.* is what a turn end really is.
+  if (p.event === 'session.execution.started') return { ...base, kind: 'state', state: 'working' }
+  if (p.event === 'session.execution.succeeded') return { ...base, kind: 'state', state: 'done' }
+  if (p.event === 'session.execution.failed') {
+    return { ...base, kind: 'state', state: 'done', errored: true }
+  }
+  // The user was right there (Esc / Ctrl-C in the TUI) — same reading as claude's interrupt.
+  if (p.event === 'session.execution.interrupted') {
+    return { ...base, kind: 'state', state: 'done', interrupted: true }
+  }
+  // v2's turn START: the user message lands in the session inbox (item.type === 'user').
+  // newTurn so per-turn fan-out clears once per turn, like claude's UserPromptSubmit.
+  if (p.event === 'session.inbox.enqueued') {
+    if ((p.item && p.item.type) !== 'user') return null
+    return { ...base, kind: 'state', state: 'working', newTurn: true }
+  }
+  if (p.event === 'session.tool.called') return { ...base, kind: 'state', state: 'working' }
+  // ── v1 (1.x runtimes), kept so an older opencode keeps reporting exactly as before.
   // The plugin forwards message.updated only for user messages — opencode's turn start
   // (mirrors Claude's UserPromptSubmit), so per-turn fan-out clears once per turn.
   if (p.event === 'message.updated' && p.role === 'user') {

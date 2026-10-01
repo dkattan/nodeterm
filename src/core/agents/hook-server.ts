@@ -462,6 +462,8 @@ export class HookServer {
    * what an un-wired shell gets — means "follow NODE_IDENTITY_STRICT_AFTER".
    */
   private identityStrict: () => boolean | undefined = () => undefined
+  /** See setNodeResolver. Null until a shell wires it (or in tests). */
+  private nodeResolver: ((agentId: string, payload: Record<string, unknown>) => string) | null = null
   /** The clock the cutoff is read against. A seam, so a suite can stand on either side of a DATE
    *  without touching the machine's own. */
   private identityNow: () => Date = () => new Date()
@@ -662,6 +664,18 @@ export class HookServer {
    */
   setIdentityStrictOverride(read: () => boolean | undefined): void {
     this.identityStrict = read
+  }
+
+  /**
+   * Node re-resolution for agents whose hooks arrive from a process that does NOT belong to the
+   * pane. opencode is the case: its v2 runtime runs plugins inside one shared
+   * `opencode serve --service` daemon, so every POST carries the nodeId of whichever pane
+   * STARTED the daemon — stale for every pane created after it. The plugin compensates by
+   * sending `directory` (the session's project cwd) in its payload; the shell resolves that
+   * against its workspace. Absent resolver or absent directory leaves the POSTed nodeId.
+   */
+  setNodeResolver(resolve: ((agentId: string, payload: Record<string, unknown>) => string) | null): void {
+    this.nodeResolver = resolve
   }
 
   /** Test seam only: see `identityNow`. */
@@ -1057,9 +1071,20 @@ export class HookServer {
             if (form.nodeterm_hook_event) payload.nodeterm_hook_event = form.nodeterm_hook_event
             else delete payload.nodeterm_hook_event
           }
+          // Re-resolve the node BEFORE anything reads it (raw listener, account, normalize): the
+          // POSTed nodeId can name the wrong pane for a daemon-hosted agent (opencode; see
+          // setNodeResolver). Runs inside the try, so a throwing resolver degrades to the
+          // POSTed id rather than dropping the event — the raw listener below still ends 204.
+          let eventNodeId = nodeId
+          if (agentId && this.nodeResolver) {
+            try {
+              const resolved = this.nodeResolver(agentId, payload)
+              if (resolved) eventNodeId = resolved
+            } catch {}
+          }
           // Raw listener first: it drives the transcript-tailing features (which need
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
-          this.rawListener?.(agentId, nodeId, payload, {
+          this.rawListener?.(agentId, eventNodeId, payload, {
             verified,
             ...(verified && agentId === 'claude' && form.nodeterm_context_window !== undefined
               ? { contextWindow: sessionContextWindow(form.nodeterm_context_window) }
@@ -1074,7 +1099,7 @@ export class HookServer {
           const account = observedClaudeAccount(agentId, payload)
           // A held request keeps its `held` ticket only when the posting script can honor a
           // structured answer (core/agents/permission-decision.ts, MIN_STRUCTURED_ANSWER_REVISION).
-          const raw = normalizeFor(agentId, { nodeId, agentId, payload })
+          const raw = normalizeFor(agentId, { nodeId: eventNodeId, agentId, payload })
           const normalized = raw ? labelHeldForRevision(raw, clientRevision) : raw
           const labelled = normalized
             ? { ...normalized, verified, clientRevision, ...(account ? { account } : {}) }

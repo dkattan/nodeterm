@@ -160,15 +160,15 @@ describe('generated plugin behavior (executed)', () => {
     await push({ type: 'question.rejected', properties: { sessionID: 'ses_1', requestID: 'que_1' } })
 
     expect(posts.map((p) => p.payload)).toEqual([
-      { event: 'session.created', sessionID: 'ses_1' },
-      { event: 'session.idle', sessionID: 'ses_1' },
-      { event: 'session.error', sessionID: 'ses_1' },
-      { event: 'permission.asked', sessionID: 'ses_1' },
-      { event: 'permission.asked', sessionID: 'ses_1' },
-      { event: 'permission.replied', sessionID: 'ses_1' },
-      { event: 'question.asked', sessionID: 'ses_1' },
-      { event: 'question.replied', sessionID: 'ses_1' },
-      { event: 'question.rejected', sessionID: 'ses_1' }
+      { event: 'session.created', sessionID: 'ses_1', directory: '' },
+      { event: 'session.idle', sessionID: 'ses_1', directory: '' },
+      { event: 'session.error', sessionID: 'ses_1', directory: '' },
+      { event: 'permission.asked', sessionID: 'ses_1', directory: '' },
+      { event: 'permission.asked', sessionID: 'ses_1', directory: '' },
+      { event: 'permission.replied', sessionID: 'ses_1', directory: '' },
+      { event: 'question.asked', sessionID: 'ses_1', directory: '' },
+      { event: 'question.replied', sessionID: 'ses_1', directory: '' },
+      { event: 'question.rejected', sessionID: 'ses_1', directory: '' }
     ])
     expect(posts[0].url).toBe('http://127.0.0.1:43210/hook/opencode')
     expect(posts[0].nodeId).toBe('node-1')
@@ -181,7 +181,7 @@ describe('generated plugin behavior (executed)', () => {
       type: 'message.updated',
       properties: { info: { id: 'm2', sessionID: 'ses_1', role: 'assistant' } }
     })
-    expect(posts.map((p) => p.payload)).toEqual([{ event: 'message.updated', sessionID: 'ses_1', role: 'user' }])
+    expect(posts.map((p) => p.payload)).toEqual([{ event: 'message.updated', sessionID: 'ses_1', role: 'user', directory: '' }])
   })
 
   it('posts a user message.updated ONCE per messageID — later updates of the same message are not new turns', async () => {
@@ -200,9 +200,9 @@ describe('generated plugin behavior (executed)', () => {
     await push(user('m1')) // post-idle bookkeeping touch — must NOT resurrect the turn
     await push(user('m2')) // a genuinely new prompt still counts
     expect(posts.map((p) => p.payload)).toEqual([
-      { event: 'message.updated', sessionID: 'ses_1', role: 'user' },
-      { event: 'session.idle', sessionID: 'ses_1' },
-      { event: 'message.updated', sessionID: 'ses_1', role: 'user' }
+      { event: 'message.updated', sessionID: 'ses_1', role: 'user', directory: '' },
+      { event: 'session.idle', sessionID: 'ses_1', directory: '' },
+      { event: 'message.updated', sessionID: 'ses_1', role: 'user', directory: '' }
     ])
   })
 
@@ -216,7 +216,96 @@ describe('generated plugin behavior (executed)', () => {
   it('forwards tool.execute.before from the v2 bus event of that name', async () => {
     const { push } = await installAndRunPlugin('plugin-under-test')
     await push({ type: 'tool.execute.before', properties: { tool: 'bash', sessionID: 'ses_1', callID: 'c1' } })
-    expect(posts.map((p) => p.payload)).toEqual([{ event: 'tool.execute.before', sessionID: 'ses_1' }])
+    expect(posts.map((p) => p.payload)).toEqual([{ event: 'tool.execute.before', sessionID: 'ses_1', directory: '' }])
+  })
+
+  // ── v2 (2.x) bus: measured on 2.0.19 against a live daemon. Events carry their payload in
+  // "data" (not v1's "properties"), turn end is session.execution.* (durable), turn start is
+  // session.inbox.enqueued with item.type=user, and every event names its project directory —
+  // the routing fact that lets the shell re-resolve the owning node (the daemon's own
+  // NODETERM_* env is frozen at daemon start, so its nodeId is stale for later panes).
+  describe('v2 bus (data envelope + execution lifecycle + directory)', () => {
+    it('forwards the v2 turn lifecycle with directory and data-envelope sessionID', async () => {
+      const { push } = await installAndRunPlugin('plugin-under-test')
+      await push({
+        type: 'session.created',
+        location: { directory: '/repo' },
+        data: { sessionID: 'ses_v2' }
+      })
+      await push({
+        type: 'session.execution.started',
+        location: { directory: '/repo' },
+        data: { sessionID: 'ses_v2' }
+      })
+      await push({
+        type: 'session.execution.succeeded',
+        location: { directory: '/repo' },
+        data: { sessionID: 'ses_v2' }
+      })
+      expect(posts.map((p) => p.payload)).toEqual([
+        { event: 'session.created', sessionID: 'ses_v2', directory: '/repo' },
+        { event: 'session.execution.started', sessionID: 'ses_v2', directory: '/repo' },
+        { event: 'session.execution.succeeded', sessionID: 'ses_v2', directory: '/repo' }
+      ])
+    })
+
+    it('forwards failed/interrupted execution ends', async () => {
+      const { push } = await installAndRunPlugin('plugin-under-test')
+      await push({ type: 'session.execution.failed', data: { sessionID: 'ses_v2' }, location: { directory: '/repo' } })
+      await push({ type: 'session.execution.interrupted', data: { sessionID: 'ses_v2' }, location: { directory: '/repo' } })
+      expect(posts.map((p) => p.payload)).toEqual([
+        { event: 'session.execution.failed', sessionID: 'ses_v2', directory: '/repo' },
+        { event: 'session.execution.interrupted', sessionID: 'ses_v2', directory: '/repo' }
+      ])
+    })
+
+    it('forwards inbox-enqueued user messages (v2 turn start) and tool calls', async () => {
+      const { push } = await installAndRunPlugin('plugin-under-test')
+      await push({
+        type: 'session.inbox.enqueued',
+        data: { sessionID: 'ses_v2', item: { type: 'user', payload: { text: 'hi' } } },
+        location: { directory: '/repo' }
+      })
+      await push({
+        type: 'session.inbox.enqueued',
+        data: { sessionID: 'ses_v2', item: { type: 'subagent', payload: {} } },
+        location: { directory: '/repo' }
+      })
+      await push({ type: 'session.tool.called', data: { sessionID: 'ses_v2' }, location: { directory: '/repo' } })
+      expect(posts.map((p) => p.payload)).toEqual([
+        { event: 'session.inbox.enqueued', sessionID: 'ses_v2', directory: '/repo' },
+        { event: 'session.tool.called', sessionID: 'ses_v2', directory: '/repo' }
+      ])
+    })
+
+    it('refuses REPLAYED durable events (older or equal seq) but accepts newer ones', async () => {
+      // The durable tail replays on plugin (re)load; a replayed execution.failed must not
+      // stamp errored on a node that is mid-turn. Strictly-newer seq only, per session.
+      const { push } = await installAndRunPlugin('plugin-under-test')
+      const ev = (seq: number) => ({
+        type: 'session.execution.failed',
+        data: { sessionID: 'ses_v2' },
+        durable: { aggregateID: 'ses_v2', seq, version: 1 }
+      })
+      await push(ev(10))
+      await push(ev(10)) // exact replay — refused
+      await push(ev(9)) // stale — refused
+      await push(ev(11)) // genuinely newer — passes
+      expect(posts.map((p) => p.payload)).toEqual([
+        { event: 'session.execution.failed', sessionID: 'ses_v2', directory: '' },
+        { event: 'session.execution.failed', sessionID: 'ses_v2', directory: '' }
+      ])
+    })
+
+    it('forwards session.status when the server ever publishes it (idle → done)', async () => {
+      const { push } = await installAndRunPlugin('plugin-under-test')
+      await push({ type: 'session.status', data: { sessionID: 'ses_v2', status: { type: 'idle' } } })
+      await push({ type: 'session.status', data: { sessionID: 'ses_v2', status: { type: 'busy' } } })
+      expect(posts.map((p) => p.payload)).toEqual([
+        { event: 'session.idle', sessionID: 'ses_v2', directory: '' },
+        { event: 'session.execution.started', sessionID: 'ses_v2', directory: '' }
+      ])
+    })
   })
 })
 
@@ -266,7 +355,7 @@ describe('generated plugin unix-socket transport', () => {
       expect(received[0].token).toBe('socktok')
       const params = new URLSearchParams(received[0].body)
       expect(params.get('nodeId')).toBe('node-ssh')
-      expect(JSON.parse(params.get('payload') ?? '{}')).toEqual({ event: 'session.idle', sessionID: 'ses_ssh' })
+      expect(JSON.parse(params.get('payload') ?? '{}')).toEqual({ event: 'session.idle', sessionID: 'ses_ssh', directory: '' })
     } finally {
       server.close()
     }

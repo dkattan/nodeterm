@@ -1830,6 +1830,42 @@ export class WorkspaceStore {
     return hit.root ? resolveNodes([hit.node], hit.root)[0] : hit.node
   }
 
+  /**
+   * The agent node of `agentId` whose resolved cwd is exactly `dir` (first match in index order),
+   * or undefined. The hook server's node re-resolution for daemon-hosted agents (opencode):
+   * their plugin runs in ONE shared `opencode serve --service` process, so every hook POST
+   * carries the nodeId of whichever pane STARTED the daemon and every event also names the
+   * session's project directory — the only durable fact that maps an event back to the pane
+   * that owns it. Same scan and resolution shape as `getNodeResolved`; never an agent-agnostic
+   * match (a plain terminal's cwd must not absorb another agent's events).
+   */
+  nodeForAgentDirectory(agentId: string, dir: string): string | undefined {
+    if (!dir) return undefined
+    const want = path.resolve(dir)
+    for (const e of this.index?.entries ?? []) {
+      // LOCAL canvases only. An SSH project's opencode runs on the HOST — its daemon posts
+      // through the tunnel with a remote path this machine cannot resolve against any node's
+      // local cwd, and an inline (cwd-less) canvas has no project root to resolve `./` against.
+      if (!e.cwd || e.ssh) continue
+      let nodes: CanvasNodeState[] | undefined
+      const raw = this.lastWritten.get(projectFilePath(e.cwd))
+      if (raw) {
+        try {
+          nodes = (JSON.parse(raw) as ProjectFileV1).nodes
+        } catch {
+          // Corrupt cached content: skip this entry, keep scanning the others.
+        }
+      }
+      for (const n of nodes ?? []) {
+        if (n.kind !== 'terminal') continue
+        if ((n.agentId ?? undefined) !== agentId) continue
+        const cwd = n.cwd && (n.cwd === '.' || n.cwd.startsWith('./')) ? path.resolve(e.cwd, n.cwd) : n.cwd
+        if (cwd && path.resolve(cwd) === want) return n.id
+      }
+    }
+    return undefined
+  }
+
   private findNode(nodeId: string): { node: CanvasNodeState; root?: string } | undefined {
     for (const e of this.index?.entries ?? []) {
       let nodes: CanvasNodeState[] | undefined

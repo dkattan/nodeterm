@@ -135,33 +135,80 @@ export default {
       } catch {}
     }
     const seenUserMsgs = new Set()
+    // v2 bus events are DURABLE where they matter (session.execution.*) and the loader
+    // subscription replays the tail on (re)load — a replayed execution.failed must not stamp
+    // errored on a node that is mid-turn. A per-session high-water seq mark refuses anything
+    // not strictly newer; v1 events (no durable envelope) are exempt. In-memory: the daemon
+    // outlives panes, and losing the watermark on a daemon restart at worst re-asserts a done.
+    const seenSeq = new Map()
     const handle = (ev) => {
       if (!ev || !ev.type) return
-      const p = ev.properties || {}
+      // v2 carries the payload in "data" (v1 used "properties"); read both so older runtimes
+      // keep working. "location.directory" names the project the session runs in — the ONE fact
+      // that identifies the owning pane, because this plugin runs in a shared opencode-serve
+      // --service daemon whose NODETERM_* env was frozen at ITS start (measured 2.0.19: every
+      // CLI and TUI connects to one daemon, and plugins read the daemon's env, not the pane's).
+      const p = ev.data || ev.properties || {}
       const info = p.info || {}
+      const directory =
+        (ev.location && ev.location.directory) || (p.location && p.location.directory) || ''
+      const sessionID = p.sessionID || info.id || undefined
+      // Durable replay gate (see seenSeq above): strictly-newer only, per session aggregate.
+      if (ev.durable && sessionID) {
+        const agg = ev.durable.aggregateID || sessionID
+        const seq = ev.durable.seq || 0
+        if (seq && (seenSeq.get(agg) ?? 0) >= seq) return
+        seenSeq.set(agg, seq || (seenSeq.get(agg) ?? 0))
+        if (seenSeq.size > 500) seenSeq.delete(seenSeq.keys().next().value)
+      }
+      // "directory" rides EVERY post so the shell can route the event to the node whose project
+      // cwd matches — the daemon's baked-in nodeId is stale the moment the daemon outlives its
+      // starting pane (the common case; see the comment at "directory" above).
       switch (ev.type) {
         case 'session.created':
-          return post('session.created', { sessionID: info.id || p.sessionID })
+          return post('session.created', { sessionID, directory })
+        case 'session.status': {
+          // v2's declared state event (idle|busy|retry). Measured on 2.0.19 it never actually
+          // publishes — execution.* below is the real turn end — but forwarding it costs one
+          // case and keeps the mapping honest the day the server starts emitting it.
+          const status = p.status && p.status.type
+          if (status === 'idle') return post('session.idle', { sessionID, directory })
+          if (status === 'busy' || status === 'retry') {
+            return post('session.execution.started', { sessionID, directory })
+          }
+          return
+        }
         case 'session.idle':
         case 'session.error':
-          return post(ev.type, { sessionID: p.sessionID })
+          return post(ev.type, { sessionID, directory })
+        // v2's real turn lifecycle (durable). failed/interrupted still END the turn: done with
+        // the errored/interrupted annotation, exactly like claude's StopFailure.
+        case 'session.execution.started':
+          return post('session.execution.started', { sessionID, directory })
+        case 'session.execution.succeeded':
+          return post('session.execution.succeeded', { sessionID, directory })
+        case 'session.execution.failed':
+          return post('session.execution.failed', { sessionID, directory })
+        case 'session.execution.interrupted':
+          return post('session.execution.interrupted', { sessionID, directory })
         // v2 renamed the bus event (1.x emitted permission.updated); post the wire name.
         case 'permission.updated':
         case 'permission.asked':
-          return post('permission.asked', { sessionID: p.sessionID })
+          return post('permission.asked', { sessionID, directory })
         case 'permission.replied':
-          return post('permission.replied', { sessionID: p.sessionID })
+          return post('permission.replied', { sessionID, directory })
         // The question (elicitation) dialog blocks the turn WITHOUT idling the session —
         // unforwarded, the badge sat on RUNNING while the TUI waited for an answer. Gone
         // from v2's bus, kept for 1.x runtimes.
         case 'question.asked':
         case 'question.replied':
         case 'question.rejected':
-          return post(ev.type, { sessionID: p.sessionID })
+          return post(ev.type, { sessionID, directory })
         // A real bus event on v2 (it was a named hook on 1.x).
         case 'tool.execute.before':
           return post('tool.execute.before', {
-            sessionID: p.sessionID || (p.tool && p.tool.sessionID)
+            sessionID: sessionID || (p.tool && p.tool.sessionID),
+            directory
           })
         case 'message.updated': {
           if ((info.role || p.role) !== 'user') return
@@ -172,8 +219,18 @@ export default {
               for (const first of seenUserMsgs) { seenUserMsgs.delete(first); break }
             }
           }
-          return post('message.updated', { sessionID: info.sessionID || p.sessionID, role: 'user' })
+          return post('message.updated', { sessionID: info.sessionID || sessionID, role: 'user', directory })
         }
+        // v2's turn start: the user message is enqueued into the session inbox (durable;
+        // one event per message, no dedupe needed beyond the watermark above).
+        case 'session.inbox.enqueued': {
+          if ((p.item && p.item.type) !== 'user') return
+          return post('session.inbox.enqueued', { sessionID, directory })
+        }
+        // v2 mid-turn activity. session.tool.called fires per tool call — enough to keep the
+        // badge on RUNNING; the finer input/progress events are noise for a status badge.
+        case 'session.tool.called':
+          return post('session.tool.called', { sessionID, directory })
       }
     }
     // One subscription for the server's lifetime; the loader calls the returned dispose
