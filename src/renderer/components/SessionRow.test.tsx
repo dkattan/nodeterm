@@ -42,6 +42,7 @@ describe('SessionRow status age', () => {
     const html = renderToStaticMarkup(
       <SessionRow
         row={{ ...row, historicalStateLabel: 'Last seen Idle' }}
+        liveLinkSource="local"
         stateAgeLabel="5m ago"
         onClick={vi.fn()}
         onClose={vi.fn()}
