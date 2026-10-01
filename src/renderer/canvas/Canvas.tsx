@@ -15710,9 +15710,9 @@ export function Canvas() {
       if (!owner) return undefined
       return { node: owner.nodes.find((n) => n.id === nodeId), projectIsSsh: !!owner.ssh }
     }
-    return api.onAgentStatus((e: NormalizedAgentEvent) => {
+    const unsubscribe = api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
-      if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
+      if (e.sessionId && e.kind !== 'session') cs.setSessionId(e.nodeId, e.sessionId)
       // Which Claude account the posting session is ACTUALLY on — a hook-derived LABEL, captured
       // off any event that carries one, exactly like `sessionId` above: a plain terminal running
       // `CLAUDE_CONFIG_DIR=~/.claude-2 claude` announces its identity nowhere else.
@@ -15887,7 +15887,7 @@ export function Canvas() {
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
           if (e.sessionPhase === 'start') {
-            cs.setState(e.nodeId, undefined, e.agentId)
+            cs.setSessionBoundary(e.nodeId, 'start', e.agentId, e.sessionId)
             // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
             // this node is now false — our own `/exit` produces a SessionEnd, never a
             // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
@@ -15906,7 +15906,10 @@ export function Canvas() {
             cs.setSessionEnded(e.nodeId, false)
           }
           if (e.sessionPhase === 'end') {
-            cs.setState(e.nodeId, undefined, e.agentId)
+            // Display continuity: a same-conversation `done` is preserved as display-only
+            // (`restored`) — never authorized for messaging or safety — and every other state
+            // clears, which is what a bare `setState(undefined)` used to do.
+            cs.setSessionBoundary(e.nodeId, 'end', e.agentId, e.sessionId)
             // Recorded as its OWN fact, after the state: `state: undefined` alone is what an idle
             // agent looks like, and the memory levers would keep protecting a pane that now holds
             // only a shell (see `agentProcessInPane`).
@@ -15923,6 +15926,21 @@ export function Canvas() {
           break
       }
     })
+    // Subscribe FIRST so a hook that lands while the request is in flight wins. The store refuses
+    // to let the later display snapshot overwrite any state already observed live in this run.
+    let cancelled = false
+    void api
+      .agentStatusSnapshot()
+      .then((snapshot) => {
+        if (!cancelled) useAgentStatus.getState().hydrateSnapshot(snapshot)
+      })
+      .catch(() => {
+        // Best-effort continuity: a disconnected/older core leaves today's Unknown behavior.
+      })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
   }, [])
 
   // The crisp gate's zoom threshold depends on the display (issue #986): report the device-pixel

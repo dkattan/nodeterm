@@ -244,6 +244,8 @@ export interface SessionRowVM {
   statusClock?: StatusClockKind
   /** The state a RESTORED clock was for (display only — never the row's live state). */
   lastSeenState?: AgentState
+  /** The workflow state is the core's restart-safe last-known value, not a live observation. */
+  statusRestored: boolean
   unread: boolean
   session?: string
   loop?: { kind: 'loop' | 'schedule' | 'cron'; count: number }
@@ -329,6 +331,7 @@ function toRow(
     // Transition clock first; the "last seen" one only while this run has seen no transition.
     statusUpdatedAt: status?.lastEventAt ?? status?.lastSeen?.at,
     ...statusClockOf(status),
+    statusRestored: !!status?.restored,
     unread: !!status?.unread,
     session: status?.session,
     // A dismissed cron/schedule entry is retained as a fact (the hibernation guard reads it) but

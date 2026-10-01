@@ -397,6 +397,9 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   // A relay tab's `seedAgentIdentity` is a local no-op (relay-api.ts), so this never crosses the
   // tunnel today; it WRITES the mirror's session identities, so a peer that sent it is an editor.
   IPC.agentSeedIdentity,
+  // Writes the mirror's display-only last-known table (renderer→core) — a mirror write, like
+  // agentSeedIdentity, so a peer that sent it is an editor.
+  IPC.agentStatusSnapshot,
   // Canvas edits and the one presence cast VIEW does not list.
   IPC.canvasMut,
   IPC.presenceDino,

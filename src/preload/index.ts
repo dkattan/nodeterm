@@ -858,6 +858,7 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentRenameNode, handler)
     return () => ipcRenderer.removeListener(IPC.agentRenameNode, handler)
   },
+  agentStatusSnapshot: () => ipcRenderer.invoke(IPC.agentStatusSnapshot),
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentSubagentActivity, handler)

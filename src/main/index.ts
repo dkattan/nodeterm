@@ -82,6 +82,7 @@ import {
   type AgentMessagingDeps
 } from '../core/agents/agent-messaging'
 import { registerStationNoticeIpc, StationNoticeMonitor } from '../core/agents/station-notice'
+import { registerAgentStatusHandlers } from '../core/agent-status-handlers'
 import {
   StationOutcomeStore,
   clearOutcomesAfterControl,
@@ -2019,6 +2020,13 @@ app.whenReady().then(async () => {
   // "queued" about a message that has since landed or lapsed.
   messagingDeps.onQueuedResult = (req, outcome) => stationNotices.onQueuedResult(req, outcome)
   registerStationNoticeIpc(corePlatform, () => stationNotices)
+
+  registerAgentStatusHandlers(corePlatform, {
+    accountIdForNode: (nodeId) => workspaceStore.getNode(nodeId)?.accountId,
+    // Transcripts for SSH-project nodes live on their host; local locators must never inspect a
+    // same-id file under this Mac's home and mistake it for remote evidence.
+    isRemoteNode: (nodeId) => !!workspaceStore.sshProjectIdForNode(nodeId)
+  })
   // Station task outcomes (`report-outcome`, src/core/station-outcome-store.ts): what each station
   // said about its OWN task, read by the renderer's `--after-success` gate. Held here, in main, so a
   // renderer reload does not lose it; pushed whole to the window on every change.

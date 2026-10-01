@@ -204,9 +204,15 @@ export function SessionRow({
             {stateAgeLabel && (
               <span
                 className={`ss-meta__state-age${row.statusClock === 'restored' ? ' ss-meta__state-age--restored' : ''}`}
-                title={sessionStateAgeTitle(stateAgeLabel, row.statusClock, row.lastSeenState)}
+                title={
+                  row.statusClock
+                    ? sessionStateAgeTitle(stateAgeLabel, row.statusClock, row.lastSeenState)
+                    : row.statusRestored
+                      ? `Last known state entered ${stateAgeLabel}`
+                      : `Entered this state ${stateAgeLabel}`
+                }
               >
-                {stateAgeLabel}
+                {row.statusRestored && !row.statusClock ? `last known · ${stateAgeLabel}` : stateAgeLabel}
               </span>
             )}
           </div>
