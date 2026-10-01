@@ -958,8 +958,13 @@ export function createAgentStatusSession(
         // Same reasoning: a state transition is fired by a live CLI, so "it exited" no longer holds.
         if (prev.sessionEnded) next.sessionEnded = undefined
         const byId = { ...s.byId, [id]: next }
-        // Retain update history without persisting live state or the hibernation clocks.
-        save(byId)
+        // Retain update history without persisting live state or the hibernation clocks: a plain
+        // transition writes nothing to the main table unless a PERSISTED flag changed (dropping
+        // one must reach disk, or a relaunch would restore a hibernated/paused node that has been
+        // demonstrably running since). `lastUpdateAt`/`lastKnownState` ride the main table's save
+        // whenever it does run; the `lastSeen` CLOCK has its own debounced key below.
+        if (prev.hibernated || prev.paused || prev.dropped || prev.sessionEnded) save(byId)
+        scheduleClockSave()
         return { byId }
       })
       // After the set: a listener reads the store and must see this event applied.
