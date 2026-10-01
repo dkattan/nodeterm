@@ -4527,6 +4527,7 @@ export function TerminalNode({
           })
           useAgentStatus.getState().setLastRestartRefusal(id, { reason, detail })
         }
+
         const st = useAgentStatus.getState().byId[id]
         const currentNode = getNode(id)
         const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
