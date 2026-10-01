@@ -9299,6 +9299,24 @@ button.group-node__setup:disabled {
 .ss-group.is-active .ss-group__name { color: var(--accent); }
 .ss-group__branch { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-group__count { font-size: 10px; color: var(--muted); }
+
+/* Repo-level header (sits above the project header when projects share a git repo). */
+.ss-repo__head { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 2px; cursor: pointer; border-radius: 6px; }
+.ss-repo__head:hover { background: var(--panel-header); }
+.ss-repo__name { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-repo__count { font-size: 9px; font-weight: 700; color: var(--muted); background: var(--panel-header); border-radius: 4px; padding: 1px 5px; }
+
+/* Adoptable-worktree row: a worktree on disk with no bound canvas group. Dashed border + branch
+   chip distinguish it from a session row; it has no status badge (no session). */
+.ss-adoptable__list { padding: 2px 6px 4px 22px; display: flex; flex-direction: column; gap: 3px; }
+.ss-adoptable { display: flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px dashed var(--border); border-radius: 6px; }
+.ss-adoptable.is-disabled { opacity: 0.5; }
+.ss-adoptable__branch { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 600; color: var(--text); flex: 0 0 auto; }
+.ss-adoptable__branch svg { width: 11px; height: 11px; }
+.ss-adoptable__path { font-size: 9.5px; color: var(--muted); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-adoptable__bind { font-size: 10px; font-weight: 600; color: var(--accent); background: rgba(var(--tint-rgb), 0.1); border: 1px solid transparent; border-radius: 5px; padding: 2px 8px; cursor: pointer; flex: 0 0 auto; }
+.ss-adoptable__bind:hover:not(:disabled) { background: rgba(var(--tint-rgb), 0.18); }
+.ss-adoptable__bind:disabled { cursor: default; opacity: 0.5; }
 /* Signal badges on the project header: 🔔 needs-you count / ✓ unread count. Visible even
    while the group is collapsed — that's their main job. */
 .ss-group__sig { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 700; flex: 0 0 auto; line-height: 0; }

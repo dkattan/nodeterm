@@ -26,6 +26,7 @@ const status = (branch: string, hasRepo = true): GitStatus => ({
 })
 const noop = () => {}
 const sidebarProps: SessionsSidebarProps = {
+  onBindWorktree: noop,
   open: true, pinned: true, liveActiveNodes: null, onTogglePin: noop, onClose: noop,
   onFocusNode: noop, onCloseSession: noop, onRenameSession: noop, onAiNameSession: noop,
   onRowContextMenu: noop, onProjectContextMenu: noop, onSwitchProject: noop, onAddToProject: noop,
